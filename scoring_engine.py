@@ -653,10 +653,13 @@ def main():
     
     # Test wallet - you can replace with any wallet
     # This is a known active trading wallet from the search results
-    test_wallet = "H72yLkhTnoBfhBTXXaj1RBXuirm8s8G5fcVh2XpQLggM"
+    test_wallet = None
     
     if len(sys.argv) > 1:
         test_wallet = sys.argv[1]
+    else:
+        print("Usage: python scoring_engine.py <wallet_address>")
+        sys.exit(1)
     
     print(f"\nAnalyzing wallet: {test_wallet}")
     print("-" * 60)
