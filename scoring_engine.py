@@ -188,89 +188,67 @@ def fetch_parsed_transactions(wallet_address: str, limit: int = 100) -> List[Dic
 
 def parse_swap_transaction(tx: Dict, wallet_address: str) -> Optional[Trade]:
     """
-    Parse a Helius enhanced transaction into a Trade object.
-    
-    Helius provides parsed data with 'tokenTransfers' and 'nativeTransfers'.
+    Parse transaction using WalletIQ method - checking pre/post balances.
     """
     try:
-        # Skip failed transactions
-        if tx.get('transactionError'):
+        if not tx:
             return None
-        
+            
         signature = tx.get('signature', '')
         timestamp = tx.get('timestamp', 0)
-        tx_type = tx.get('type', '')
         
-        # We're interested in SWAP transactions
-        if tx_type != 'SWAP':
-            return None
-        
-        # Get token transfers
+        # Get token transfers from Helius enhanced data
         token_transfers = tx.get('tokenTransfers', [])
         native_transfers = tx.get('nativeTransfers', [])
         
-        if not token_transfers:
+        if not token_transfers and not native_transfers:
             return None
         
-        # Analyze the swap direction
-        # If wallet received tokens and sent SOL = BUY
-        # If wallet sent tokens and received SOL = SELL
-        
-        sol_in = 0
-        sol_out = 0
-        token_in = None
-        token_out = None
-        token_in_amount = 0
-        token_out_amount = 0
-        
-        # Check native (SOL) transfers
+        # Calculate SOL change for this wallet
+        sol_change = 0
         for transfer in native_transfers:
             if transfer.get('toUserAccount') == wallet_address:
-                sol_in += transfer.get('amount', 0) / 1e9  # Convert lamports to SOL
+                sol_change += transfer.get('amount', 0) / 1e9
             if transfer.get('fromUserAccount') == wallet_address:
-                sol_out += transfer.get('amount', 0) / 1e9
+                sol_change -= transfer.get('amount', 0) / 1e9
         
-        # Check token transfers
+        # Calculate token changes
         for transfer in token_transfers:
             mint = transfer.get('mint', '')
             amount = transfer.get('tokenAmount', 0)
             
-            if transfer.get('toUserAccount') == wallet_address:
-                token_in = mint
-                token_in_amount = amount
-            if transfer.get('fromUserAccount') == wallet_address:
-                token_out = mint
-                token_out_amount = amount
-        
-        # Determine trade side
-        # BUY: SOL out, Token in (not SOL)
-        # SELL: Token out (not SOL), SOL in
-        
-        if sol_out > 0 and token_in and token_in != SOL_MINT:
-            # This is a BUY
-            return Trade(
-                timestamp=timestamp,
-                signature=signature,
-                side='buy',
-                token_mint=token_in,
-                token_amount=token_in_amount,
-                sol_amount=sol_out,
-                price_per_token=sol_out / token_in_amount if token_in_amount > 0 else 0,
-                dex=tx.get('source', 'Unknown')
-            )
-        
-        elif sol_in > 0 and token_out and token_out != SOL_MINT:
-            # This is a SELL
-            return Trade(
-                timestamp=timestamp,
-                signature=signature,
-                side='sell',
-                token_mint=token_out,
-                token_amount=token_out_amount,
-                sol_amount=sol_in,
-                price_per_token=sol_in / token_out_amount if token_out_amount > 0 else 0,
-                dex=tx.get('source', 'Unknown')
-            )
+            # Skip SOL/WSOL
+            if mint == SOL_MINT:
+                continue
+            
+            to_wallet = transfer.get('toUserAccount') == wallet_address
+            from_wallet = transfer.get('fromUserAccount') == wallet_address
+            
+            # BUY: Wallet receives tokens AND sends SOL
+            if to_wallet and sol_change < -0.001:
+                return Trade(
+                    timestamp=timestamp,
+                    signature=signature,
+                    side='buy',
+                    token_mint=mint,
+                    token_amount=amount,
+                    sol_amount=abs(sol_change),
+                    price_per_token=abs(sol_change) / amount if amount > 0 else 0,
+                    dex=tx.get('source', 'Unknown')
+                )
+            
+            # SELL: Wallet sends tokens AND receives SOL
+            if from_wallet and sol_change > 0.001:
+                return Trade(
+                    timestamp=timestamp,
+                    signature=signature,
+                    side='sell',
+                    token_mint=mint,
+                    token_amount=amount,
+                    sol_amount=sol_change,
+                    price_per_token=sol_change / amount if amount > 0 else 0,
+                    dex=tx.get('source', 'Unknown')
+                )
         
         return None
         
