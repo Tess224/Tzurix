@@ -48,10 +48,21 @@ BIRDEYE_API_KEY = os.environ.get('BIRDEYE_API_KEY')
 # ============================================================================
 
 STARTING_SCORE = 10
-PRICE_MULTIPLIER = 0.0001  # Price = Score × $0.0001
 TOTAL_SUPPLY = 100_000_000  # 100M tokens per agent stock
 DAILY_SCORE_CAP = 0.10  # ±10% max daily change
-SOL_PRICE_USD = 150  # Default, will fetch dynamically
+
+# SOL-based pricing (assuming $150/SOL baseline for initial calc)
+# Starting: Score 10 = 66.7 SOL market cap = ~$10k at $150/SOL
+# Formula: Price in SOL = Score × LAMPORTS_PER_SCORE_POINT / 1e9
+LAMPORTS_PER_SCORE_POINT = 667  # 667 lamports per score point
+# So Score 10 = 6,670 lamports = 0.00000667 SOL per token
+# 100M tokens × 0.00000667 SOL = 667 SOL MC (but we want 66.7 SOL)
+# Correction: 66.7 lamports per score point
+LAMPORTS_PER_SCORE_POINT = 67  # 67 lamports per score point
+# Score 10 = 670 lamports = 0.00000067 SOL per token
+# 100M × 0.00000067 = 67 SOL MC ≈ $10k at $150/SOL ✓
+
+SOL_PRICE_USD = 150  # For frontend USD conversion only
 
 # ============================================================================
 # DATABASE MODELS
@@ -94,9 +105,13 @@ class Agent(db.Model):
     
     def to_dict(self):
         """Convert agent to dictionary for JSON response."""
-        price_usd = self.current_score * PRICE_MULTIPLIER
-        price_sol = price_usd / SOL_PRICE_USD
-        market_cap_usd = price_usd * self.total_supply
+        price_lamports = self.current_score * LAMPORTS_PER_SCORE_POINT
+        price_sol = price_lamports / 1_000_000_000
+        market_cap_sol = price_sol * self.total_supply
+        
+        # USD values for display
+        price_usd = price_sol * SOL_PRICE_USD
+        market_cap_usd = market_cap_sol * SOL_PRICE_USD
         
         return {
             'id': self.id,
@@ -106,8 +121,10 @@ class Agent(db.Model):
             'creator_wallet': self.creator_wallet,
             'current_score': self.current_score,
             'previous_score': self.previous_score,
-            'price_usd': price_usd,
+            'price_lamports': price_lamports,
             'price_sol': price_sol,
+            'price_usd': price_usd,
+            'market_cap_sol': market_cap_sol,
             'market_cap_usd': market_cap_usd,
             'token_mint': self.token_mint,
             'total_supply': self.total_supply,
@@ -219,8 +236,15 @@ class Holding(db.Model):
     
     def to_dict(self):
         agent = Agent.query.get(self.agent_id)
-        current_price = agent.current_score * PRICE_MULTIPLIER if agent else 0
-        current_value = self.token_amount * current_price
+        
+        # Calculate current price in SOL
+        price_lamports = agent.current_score * LAMPORTS_PER_SCORE_POINT if agent else 0
+        current_price_sol = price_lamports / 1_000_000_000
+        current_value_sol = self.token_amount * current_price_sol
+        
+        # USD for display
+        current_price_usd = current_price_sol * SOL_PRICE_USD
+        current_value_usd = current_value_sol * SOL_PRICE_USD
         
         return {
             'id': self.id,
@@ -228,10 +252,12 @@ class Holding(db.Model):
             'agent_id': self.agent_id,
             'agent_name': agent.name if agent else None,
             'token_amount': self.token_amount,
-            'avg_buy_price': self.avg_buy_price,
-            'current_price': current_price,
-            'current_value': current_value,
-            'pnl_percent': ((current_price - self.avg_buy_price) / self.avg_buy_price * 100) if self.avg_buy_price else 0,
+            'avg_buy_price_sol': self.avg_buy_price,
+            'current_price_sol': current_price_sol,
+            'current_price_usd': current_price_usd,
+            'current_value_sol': current_value_sol,
+            'current_value_usd': current_value_usd,
+            'pnl_percent': ((current_price_sol - self.avg_buy_price) / self.avg_buy_price * 100) if self.avg_buy_price else 0,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
@@ -269,25 +295,31 @@ def calculate_price(score: int) -> dict:
     """
     Calculate token price based on score.
     
-    Price Formula: Score × $0.0001
+    Price Formula (SOL-based): 
+        Price in lamports = Score × 67 lamports
+        Price in SOL = Score × 0.000000067 SOL
     
-    Examples:
-        Score 10 = $0.001
-        Score 100 = $0.01
-        Score 1000 = $0.10
+    Examples (at Score 10):
+        Price = 670 lamports = 0.00000067 SOL
+        MC = 100M × 0.00000067 = 67 SOL ≈ $10k at $150/SOL
     """
-    sol_price = get_sol_price_usd()
+    price_lamports = score * LAMPORTS_PER_SCORE_POINT
+    price_sol = price_lamports / 1_000_000_000
     
-    price_usd = score * PRICE_MULTIPLIER
-    price_sol = price_usd / sol_price
-    price_lamports = int(price_sol * 1_000_000_000)
+    # Get USD price for display (frontend use)
+    sol_price_usd = get_sol_price_usd()
+    price_usd = price_sol * sol_price_usd
+    market_cap_sol = price_sol * TOTAL_SUPPLY
+    market_cap_usd = market_cap_sol * sol_price_usd
     
     return {
         'score': score,
-        'price_usd': price_usd,
-        'price_sol': price_sol,
         'price_lamports': price_lamports,
-        'sol_price_usd': sol_price
+        'price_sol': price_sol,
+        'price_usd': price_usd,
+        'market_cap_sol': market_cap_sol,
+        'market_cap_usd': market_cap_usd,
+        'sol_price_usd': sol_price_usd
     }
 
 
@@ -588,6 +620,7 @@ def get_trade_quote():
             'sol_amount': sol_amount,
             'fee_sol': sol_amount * 0.01,
             'tokens_received': tokens_received,
+            'price_per_token_lamports': price_data['price_lamports'],
             'price_per_token_sol': price_data['price_sol'],
             'price_per_token_usd': price_data['price_usd'],
             'current_score': agent.current_score
@@ -609,6 +642,7 @@ def get_trade_quote():
             'sol_before_fee': sol_before_fee,
             'fee_sol': sol_before_fee * 0.01,
             'sol_received': sol_received,
+            'price_per_token_lamports': price_data['price_lamports'],
             'price_per_token_sol': price_data['price_sol'],
             'price_per_token_usd': price_data['price_usd'],
             'current_score': agent.current_score
@@ -651,7 +685,7 @@ def buy_tokens():
             'error': 'Agent not found'
         }), 404
     
-    # Calculate tokens
+    # Calculate tokens (SOL-based)
     price_data = calculate_price(agent.current_score)
     sol_after_fee = sol_amount * 0.99
     tokens_received = int(sol_after_fee / price_data['price_sol'])
@@ -674,16 +708,16 @@ def buy_tokens():
         side='buy',
         token_amount=tokens_received,
         sol_amount=sol_lamports,
-        price_at_trade=price_data['price_usd'],
+        price_at_trade=price_data['price_sol'],  # Store SOL price
         tx_signature=tx_signature
     )
     db.session.add(trade)
     
-    # Update holdings
+    # Update holdings (avg price in SOL)
     holding = Holding.query.filter_by(user_id=user.id, agent_id=agent_id).first()
     if holding:
-        # Update average buy price
-        total_cost = (holding.token_amount * holding.avg_buy_price) + (tokens_received * price_data['price_usd'])
+        # Update average buy price (in SOL)
+        total_cost = (holding.token_amount * holding.avg_buy_price) + (tokens_received * price_data['price_sol'])
         total_tokens = holding.token_amount + tokens_received
         holding.avg_buy_price = total_cost / total_tokens if total_tokens > 0 else 0
         holding.token_amount = total_tokens
@@ -692,7 +726,7 @@ def buy_tokens():
             user_id=user.id,
             agent_id=agent_id,
             token_amount=tokens_received,
-            avg_buy_price=price_data['price_usd']
+            avg_buy_price=price_data['price_sol']  # Store SOL price
         )
         db.session.add(holding)
     
@@ -707,7 +741,9 @@ def buy_tokens():
         'success': True,
         'message': 'Purchase successful',
         'trade': trade.to_dict(),
-        'holding': holding.to_dict()
+        'holding': holding.to_dict(),
+        'sol_spent': sol_amount,
+        'fee_sol': fee_sol
     })
 
 
@@ -834,19 +870,22 @@ def get_user_holdings(wallet_address):
         return jsonify({
             'success': True,
             'holdings': [],
+            'total_value_sol': 0,
             'total_value_usd': 0
         })
     
     holdings = Holding.query.filter_by(user_id=user.id).all()
     holdings_data = [h.to_dict() for h in holdings if h.token_amount > 0]
     
-    total_value = sum(h['current_value'] for h in holdings_data)
+    total_value_sol = sum(h['current_value_sol'] for h in holdings_data)
+    total_value_usd = sum(h['current_value_usd'] for h in holdings_data)
     
     return jsonify({
         'success': True,
         'wallet_address': wallet_address,
         'holdings': holdings_data,
-        'total_value_usd': total_value
+        'total_value_sol': total_value_sol,
+        'total_value_usd': total_value_usd
     })
 
 
