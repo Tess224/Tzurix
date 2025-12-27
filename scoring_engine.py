@@ -16,7 +16,7 @@ import os
 import time
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
@@ -26,13 +26,13 @@ from collections import defaultdict
 # ============================================================================
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 HELIUS_API_KEY = os.environ.get('HELIUS_API_KEY', '')
-HELIUS_BASE_URL = "https://api-mainnet.helius-rpc.com/v0"
+HELIUS_BASE_URL = "https://api.helius.xyz/v0"
 HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 # Scoring constants
@@ -121,8 +121,6 @@ class ScoreResult:
 def fetch_transactions(wallet_address: str, limit: int = 100) -> List[Dict]:
     """
     Fetch enhanced transactions for a wallet using Helius API.
-    
-    Returns parsed, human-readable transaction data.
     """
     if not HELIUS_API_KEY:
         logger.warning("No HELIUS_API_KEY set - using mock data")
@@ -135,14 +133,58 @@ def fetch_transactions(wallet_address: str, limit: int = 100) -> List[Dict]:
     }
     
     try:
+        logger.info(f"Fetching transactions from: {url}")
         response = requests.get(url, params=params, timeout=30)
         
         if response.status_code == 200:
             transactions = response.json()
             logger.info(f"Fetched {len(transactions)} transactions for {wallet_address[:8]}...")
+            
+            # DETAILED LOGGING - Log first 5 transactions structure
+            for i, tx in enumerate(transactions[:5]):
+                logger.info(f"")
+                logger.info(f"=== Transaction {i+1} ===")
+                logger.info(f"  Signature: {tx.get('signature', 'N/A')[:30]}...")
+                logger.info(f"  Type: {tx.get('type', 'N/A')}")
+                logger.info(f"  Source: {tx.get('source', 'N/A')}")
+                logger.info(f"  Timestamp: {tx.get('timestamp', 'N/A')}")
+                logger.info(f"  Description: {tx.get('description', 'N/A')[:100] if tx.get('description') else 'N/A'}")
+                logger.info(f"  Fee: {tx.get('fee', 'N/A')}")
+                logger.info(f"  FeePayer: {tx.get('feePayer', 'N/A')[:20] if tx.get('feePayer') else 'N/A'}...")
+                
+                # Log token transfers
+                token_transfers = tx.get('tokenTransfers', [])
+                logger.info(f"  Token Transfers Count: {len(token_transfers)}")
+                for j, tt in enumerate(token_transfers[:5]):
+                    from_acc = tt.get('fromUserAccount', 'N/A')
+                    to_acc = tt.get('toUserAccount', 'N/A')
+                    logger.info(f"    Transfer {j+1}:")
+                    logger.info(f"      mint: {tt.get('mint', 'N/A')}")
+                    logger.info(f"      tokenAmount: {tt.get('tokenAmount', 'N/A')}")
+                    logger.info(f"      fromUserAccount: {from_acc[:20] if from_acc and from_acc != 'N/A' else 'N/A'}...")
+                    logger.info(f"      toUserAccount: {to_acc[:20] if to_acc and to_acc != 'N/A' else 'N/A'}...")
+                
+                # Log native transfers
+                native_transfers = tx.get('nativeTransfers', [])
+                logger.info(f"  Native Transfers Count: {len(native_transfers)}")
+                for j, nt in enumerate(native_transfers[:5]):
+                    from_acc = nt.get('fromUserAccount', 'N/A')
+                    to_acc = nt.get('toUserAccount', 'N/A')
+                    logger.info(f"    Native {j+1}:")
+                    logger.info(f"      amount (lamports): {nt.get('amount', 'N/A')}")
+                    logger.info(f"      fromUserAccount: {from_acc[:20] if from_acc and from_acc != 'N/A' else 'N/A'}...")
+                    logger.info(f"      toUserAccount: {to_acc[:20] if to_acc and to_acc != 'N/A' else 'N/A'}...")
+                
+                # Log account data if present
+                account_data = tx.get('accountData', [])
+                logger.info(f"  Account Data Count: {len(account_data)}")
+                
+                # Log all keys in transaction
+                logger.info(f"  All TX keys: {list(tx.keys())}")
+            
             return transactions
         else:
-            logger.error(f"Helius API error: {response.status_code} - {response.text}")
+            logger.error(f"Helius API error: {response.status_code} - {response.text[:500]}")
             return []
             
     except Exception as e:
@@ -189,93 +231,109 @@ def fetch_parsed_transactions(wallet_address: str, limit: int = 100) -> List[Dic
 def parse_swap_transaction(tx: Dict, wallet_address: str) -> Optional[Trade]:
     """
     Parse a Helius enhanced transaction into a Trade object.
-    
-    Helius provides parsed data with 'tokenTransfers' and 'nativeTransfers'.
+    With detailed logging to debug issues.
     """
     try:
-        # Skip failed transactions
-        if tx.get('transactionError'):
+        if not tx:
             return None
-        
+            
         signature = tx.get('signature', '')
+        short_sig = signature[:20] if signature else 'N/A'
         timestamp = tx.get('timestamp', 0)
         tx_type = tx.get('type', '')
+        source = tx.get('source', '')
+        description = tx.get('description', '')
         
-        # We're interested in SWAP transactions
-        if tx_type != 'SWAP':
-            return None
-        
-        # Get token transfers
         token_transfers = tx.get('tokenTransfers', [])
         native_transfers = tx.get('nativeTransfers', [])
         
+        logger.debug(f"Parsing tx {short_sig}... type={tx_type}, source={source}")
+        logger.debug(f"  Description: {description[:80] if description else 'N/A'}")
+        logger.debug(f"  tokenTransfers={len(token_transfers)}, nativeTransfers={len(native_transfers)}")
+        
         if not token_transfers:
+            logger.debug(f"  SKIP: no token transfers")
             return None
         
-        # Analyze the swap direction
-        # If wallet received tokens and sent SOL = BUY
-        # If wallet sent tokens and received SOL = SELL
-        
-        sol_in = 0
-        sol_out = 0
-        token_in = None
-        token_out = None
-        token_in_amount = 0
-        token_out_amount = 0
-        
-        # Check native (SOL) transfers
+        # Calculate SOL change for this wallet
+        sol_in = 0.0
+        sol_out = 0.0
         for transfer in native_transfers:
-            if transfer.get('toUserAccount') == wallet_address:
-                sol_in += transfer.get('amount', 0) / 1e9  # Convert lamports to SOL
-            if transfer.get('fromUserAccount') == wallet_address:
-                sol_out += transfer.get('amount', 0) / 1e9
-        
-        # Check token transfers
-        for transfer in token_transfers:
-            mint = transfer.get('mint', '')
-            amount = transfer.get('tokenAmount', 0)
+            to_addr = transfer.get('toUserAccount', '') or ''
+            from_addr = transfer.get('fromUserAccount', '') or ''
+            amount_lamports = transfer.get('amount', 0) or 0
+            amount_sol = amount_lamports / 1e9  # lamports to SOL
             
-            if transfer.get('toUserAccount') == wallet_address:
-                token_in = mint
-                token_in_amount = amount
-            if transfer.get('fromUserAccount') == wallet_address:
-                token_out = mint
-                token_out_amount = amount
+            if to_addr == wallet_address:
+                sol_in += amount_sol
+                logger.debug(f"  SOL IN: {amount_sol:.6f} from {from_addr[:10] if from_addr else 'N/A'}...")
+            if from_addr == wallet_address:
+                sol_out += amount_sol
+                logger.debug(f"  SOL OUT: {amount_sol:.6f} to {to_addr[:10] if to_addr else 'N/A'}...")
         
-        # Determine trade side
-        # BUY: SOL out, Token in (not SOL)
-        # SELL: Token out (not SOL), SOL in
+        net_sol = sol_in - sol_out
+        logger.debug(f"  SOL summary: in={sol_in:.6f}, out={sol_out:.6f}, net={net_sol:.6f}")
         
-        if sol_out > 0 and token_in and token_in != SOL_MINT:
-            # This is a BUY
-            return Trade(
-                timestamp=timestamp,
-                signature=signature,
-                side='buy',
-                token_mint=token_in,
-                token_amount=token_in_amount,
-                sol_amount=sol_out,
-                price_per_token=sol_out / token_in_amount if token_in_amount > 0 else 0,
-                dex=tx.get('source', 'Unknown')
-            )
+        # Find token changes for this wallet
+        for i, transfer in enumerate(token_transfers):
+            mint = transfer.get('mint', '') or ''
+            amount = transfer.get('tokenAmount', 0) or 0
+            to_addr = transfer.get('toUserAccount', '') or ''
+            from_addr = transfer.get('fromUserAccount', '') or ''
+            
+            logger.debug(f"  Token transfer {i+1}: mint={mint[:15] if mint else 'N/A'}...")
+            logger.debug(f"    amount={amount}, to={to_addr[:15] if to_addr else 'N/A'}..., from={from_addr[:15] if from_addr else 'N/A'}...")
+            
+            # Skip wrapped SOL
+            if mint == SOL_MINT:
+                logger.debug(f"    SKIP: is WSOL")
+                continue
+            
+            # Skip if no amount
+            if not amount or amount == 0:
+                logger.debug(f"    SKIP: zero amount")
+                continue
+            
+            is_receiving = to_addr == wallet_address
+            is_sending = from_addr == wallet_address
+            
+            logger.debug(f"    is_receiving={is_receiving}, is_sending={is_sending}")
+            
+            # BUY: Wallet receives tokens AND spent SOL
+            if is_receiving and sol_out > 0.0001:
+                logger.info(f"  >>> DETECTED BUY: {amount} tokens of {mint[:10]}... for {sol_out:.6f} SOL")
+                return Trade(
+                    timestamp=timestamp,
+                    signature=signature,
+                    side='buy',
+                    token_mint=mint,
+                    token_amount=amount,
+                    sol_amount=sol_out,
+                    price_per_token=sol_out / amount if amount > 0 else 0,
+                    dex=source
+                )
+            
+            # SELL: Wallet sends tokens AND received SOL
+            if is_sending and sol_in > 0.0001:
+                logger.info(f"  >>> DETECTED SELL: {amount} tokens of {mint[:10]}... for {sol_in:.6f} SOL")
+                return Trade(
+                    timestamp=timestamp,
+                    signature=signature,
+                    side='sell',
+                    token_mint=mint,
+                    token_amount=amount,
+                    sol_amount=sol_in,
+                    price_per_token=sol_in / amount if amount > 0 else 0,
+                    dex=source
+                )
         
-        elif sol_in > 0 and token_out and token_out != SOL_MINT:
-            # This is a SELL
-            return Trade(
-                timestamp=timestamp,
-                signature=signature,
-                side='sell',
-                token_mint=token_out,
-                token_amount=token_out_amount,
-                sol_amount=sol_in,
-                price_per_token=sol_in / token_out_amount if token_out_amount > 0 else 0,
-                dex=tx.get('source', 'Unknown')
-            )
-        
+        logger.debug(f"  NO TRADE: conditions not met (need token+SOL movement)")
         return None
         
     except Exception as e:
         logger.error(f"Error parsing transaction: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
@@ -283,15 +341,26 @@ def parse_all_transactions(transactions: List[Dict], wallet_address: str) -> Lis
     """Parse all transactions into Trade objects."""
     trades = []
     
-    for tx in transactions:
+    logger.info(f"")
+    logger.info(f"========================================")
+    logger.info(f"PARSING {len(transactions)} TRANSACTIONS")
+    logger.info(f"Wallet: {wallet_address}")
+    logger.info(f"========================================")
+    
+    for i, tx in enumerate(transactions):
         trade = parse_swap_transaction(tx, wallet_address)
         if trade:
             trades.append(trade)
+            logger.info(f"Trade {len(trades)}: {trade.side.upper()} {trade.token_amount:.2f} tokens for {trade.sol_amount:.4f} SOL")
     
     # Sort by timestamp (oldest first)
     trades.sort(key=lambda t: t.timestamp)
     
-    logger.info(f"Parsed {len(trades)} trades from {len(transactions)} transactions")
+    logger.info(f"")
+    logger.info(f"========================================")
+    logger.info(f"PARSING COMPLETE: {len(trades)} trades from {len(transactions)} transactions")
+    logger.info(f"========================================")
+    
     return trades
 
 
@@ -556,7 +625,10 @@ def calculate_agent_score(
     Returns:
         ScoreResult with raw score, final (capped) score, and metrics
     """
-    logger.info(f"Calculating score for {wallet_address[:8]}...")
+    logger.info(f"")
+    logger.info(f"############################################")
+    logger.info(f"CALCULATING SCORE FOR: {wallet_address}")
+    logger.info(f"############################################")
     
     # Step 1: Fetch transactions
     transactions = fetch_transactions(wallet_address, limit=transaction_limit)
@@ -576,7 +648,10 @@ def calculate_agent_score(
     # Step 6: Apply daily cap
     final_score, capped = apply_daily_cap(previous_score, raw_score)
     
-    logger.info(f"Score calculated: raw={raw_score}, final={final_score}, capped={capped}")
+    logger.info(f"")
+    logger.info(f"############################################")
+    logger.info(f"SCORE RESULT: raw={raw_score}, final={final_score}, capped={capped}")
+    logger.info(f"############################################")
     
     return ScoreResult(
         wallet_address=wallet_address,
@@ -585,7 +660,7 @@ def calculate_agent_score(
         previous_score=previous_score,
         capped=capped,
         metrics=metrics,
-        calculated_at=datetime.utcnow()
+        calculated_at=datetime.now(timezone.utc)
     )
 
 
@@ -635,7 +710,7 @@ def generate_mock_score(wallet_address: str, previous_score: int = STARTING_SCOR
         previous_score=previous_score,
         capped=capped,
         metrics=metrics,
-        calculated_at=datetime.utcnow()
+        calculated_at=datetime.now(timezone.utc)
     )
 
 
@@ -651,15 +726,12 @@ def main():
     print("TZURIX SCORING ENGINE")
     print("=" * 60)
     
-    # Test wallet - you can replace with any wallet
-    # This is a known active trading wallet from the search results
-    test_wallet = None
-    
-    if len(sys.argv) > 1:
-        test_wallet = sys.argv[1]
-    else:
+    # Require wallet address as argument
+    if len(sys.argv) < 2:
         print("Usage: python scoring_engine.py <wallet_address>")
         sys.exit(1)
+    
+    test_wallet = sys.argv[1]
     
     print(f"\nAnalyzing wallet: {test_wallet}")
     print("-" * 60)
@@ -704,7 +776,6 @@ def main():
     print("\n" + "=" * 60)
     
     # Price calculation
-    from decimal import Decimal
     LAMPORTS_PER_SCORE_POINT = 67
     price_lamports = result.final_score * LAMPORTS_PER_SCORE_POINT
     price_sol = price_lamports / 1_000_000_000
