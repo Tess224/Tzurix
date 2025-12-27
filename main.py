@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+from scoring_api import scoring_bp
 import requests
 
 # ============================================================================
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
+
+app.register_blueprint(scoring_bp)
 
 # Database configuration (Railway provides DATABASE_URL)
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///tzurix_dev.db')
