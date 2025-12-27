@@ -1,5 +1,5 @@
 """
-Tzurix Scoring Engine
+Tzurix Scoring Engines
 Calculates trading performance scores from on-chain Solana data
 
 Uses Helius API to fetch transaction history and calculate:
