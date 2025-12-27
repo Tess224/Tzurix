@@ -95,7 +95,7 @@ def test_scoring():
     Test endpoint to verify scoring engine is working.
     Uses mock data - no API key required.
     """
-    test_wallet = request.args.get('wallet', '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU')
+    test_wallet = "YOUR_TEST_WALLET_ADDRESS_HERE"
     
     result = generate_mock_score(test_wallet)
     
