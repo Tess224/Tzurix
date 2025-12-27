@@ -32,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 HELIUS_API_KEY = os.environ.get('HELIUS_API_KEY', '')
-HELIUS_BASE_URL = "https://api.helius.xyz/v0"
+HELIUS_BASE_URL = "https://api-mainnet.helius-rpc.com/v0"
 HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 # Scoring constants
