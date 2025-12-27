@@ -972,6 +972,134 @@ def update_agent_score():
         'new_price': price_data
     })
 
+# ============================================================================
+# API ENDPOINTS - SCORING (using scoring_engine)
+# ============================================================================
+
+@app.route('/api/score/<wallet_address>', methods=['GET'])
+def get_wallet_score(wallet_address):
+    """
+    Calculate and return score for a wallet using the scoring engine.
+    This endpoint shows detailed transaction analysis.
+    """
+    try:
+        from scoring_engine import calculate_agent_score, generate_mock_score, HELIUS_API_KEY
+        
+        if HELIUS_API_KEY:
+            logger.info(f"Calculating score for {wallet_address[:8]}... using Helius API")
+            result = calculate_agent_score(wallet_address)
+            using_real_data = True
+        else:
+            logger.info(f"No HELIUS_API_KEY - using mock data for {wallet_address[:8]}...")
+            result = generate_mock_score(wallet_address)
+            using_real_data = False
+        
+        return jsonify({
+            'success': True,
+            'wallet_address': result.wallet_address,
+            'raw_score': result.raw_score,
+            'final_score': result.final_score,
+            'previous_score': result.previous_score,
+            'capped': result.capped,
+            'calculated_at': result.calculated_at.isoformat(),
+            'using_real_data': using_real_data,
+            'metrics': {
+                'total_trades': result.metrics.total_trades,
+                'winning_trades': result.metrics.winning_trades,
+                'losing_trades': result.metrics.losing_trades,
+                'win_rate': result.metrics.win_rate,
+                'total_pnl_sol': result.metrics.total_pnl_sol,
+                'total_volume_sol': result.metrics.total_volume_sol,
+                'avg_trade_pnl': result.metrics.avg_trade_pnl,
+                'avg_hold_time_hours': result.metrics.avg_hold_time_hours,
+                'trades_per_day': result.metrics.trades_per_day,
+                'unique_tokens_traded': result.metrics.unique_tokens_traded,
+                'largest_win_sol': result.metrics.largest_win_sol,
+                'largest_loss_sol': result.metrics.largest_loss_sol,
+                'risk_adjusted_return': result.metrics.risk_adjusted_return
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error calculating score: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/agent/<int:agent_id>/refresh-score', methods=['POST'])
+def refresh_agent_score(agent_id):
+    """
+    Refresh an agent's score from on-chain data.
+    Fetches latest transactions and recalculates score.
+    """
+    try:
+        from scoring_engine import calculate_agent_score, HELIUS_API_KEY
+        
+        agent = Agent.query.get(agent_id)
+        if not agent:
+            return jsonify({
+                'success': False,
+                'error': 'Agent not found'
+            }), 404
+        
+        if not HELIUS_API_KEY:
+            return jsonify({
+                'success': False,
+                'error': 'Helius API key not configured'
+            }), 500
+        
+        # Calculate new score
+        result = calculate_agent_score(
+            wallet_address=agent.wallet_address,
+            previous_score=agent.current_score
+        )
+        
+        # Update agent
+        agent.previous_score = agent.current_score
+        agent.current_score = result.final_score
+        
+        # Calculate new price
+        price_data = calculate_price(result.final_score)
+        
+        # Record in history
+        history = ScoreHistory(
+            agent_id=agent_id,
+            score=result.final_score,
+            raw_score=result.raw_score,
+            price_usd=price_data['price_usd'],
+            price_sol=price_data['price_sol']
+        )
+        db.session.add(history)
+        db.session.commit()
+        
+        logger.info(f"📊 Score refreshed: {agent.name} {agent.previous_score} → {result.final_score}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Score refreshed from on-chain data',
+            'agent': agent.to_dict(),
+            'scoring_details': {
+                'raw_score': result.raw_score,
+                'final_score': result.final_score,
+                'capped': result.capped,
+                'metrics': {
+                    'total_trades': result.metrics.total_trades,
+                    'win_rate': result.metrics.win_rate,
+                    'total_pnl_sol': result.metrics.total_pnl_sol
+                }
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error refreshing score: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 # ============================================================================
 # DATABASE INITIALIZATION
