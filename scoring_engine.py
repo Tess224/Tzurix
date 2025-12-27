@@ -26,7 +26,7 @@ from collections import defaultdict
 # ============================================================================
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -256,8 +256,11 @@ def parse_swap_transaction(tx: Dict, wallet_address: str) -> Optional[Trade]:
             return None
         
         # Calculate SOL change for this wallet
+        # Include both native SOL transfers AND wrapped SOL (WSOL) token transfers
         sol_in = 0.0
         sol_out = 0.0
+        
+        # Check native SOL transfers
         for transfer in native_transfers:
             to_addr = transfer.get('toUserAccount', '') or ''
             from_addr = transfer.get('fromUserAccount', '') or ''
@@ -266,13 +269,28 @@ def parse_swap_transaction(tx: Dict, wallet_address: str) -> Optional[Trade]:
             
             if to_addr == wallet_address:
                 sol_in += amount_sol
-                logger.debug(f"  SOL IN: {amount_sol:.6f} from {from_addr[:10] if from_addr else 'N/A'}...")
+                logger.debug(f"  Native SOL IN: {amount_sol:.6f} from {from_addr[:10] if from_addr else 'N/A'}...")
             if from_addr == wallet_address:
                 sol_out += amount_sol
-                logger.debug(f"  SOL OUT: {amount_sol:.6f} to {to_addr[:10] if to_addr else 'N/A'}...")
+                logger.debug(f"  Native SOL OUT: {amount_sol:.6f} to {to_addr[:10] if to_addr else 'N/A'}...")
+        
+        # Also check WSOL (wrapped SOL) token transfers - this is how DEXes return SOL on sells
+        for transfer in token_transfers:
+            mint = transfer.get('mint', '') or ''
+            if mint == SOL_MINT:  # This is WSOL
+                to_addr = transfer.get('toUserAccount', '') or ''
+                from_addr = transfer.get('fromUserAccount', '') or ''
+                amount = transfer.get('tokenAmount', 0) or 0
+                
+                if to_addr == wallet_address:
+                    sol_in += amount
+                    logger.debug(f"  WSOL IN: {amount:.6f} from {from_addr[:10] if from_addr else 'N/A'}...")
+                if from_addr == wallet_address:
+                    sol_out += amount
+                    logger.debug(f"  WSOL OUT: {amount:.6f} to {to_addr[:10] if to_addr else 'N/A'}...")
         
         net_sol = sol_in - sol_out
-        logger.debug(f"  SOL summary: in={sol_in:.6f}, out={sol_out:.6f}, net={net_sol:.6f}")
+        logger.debug(f"  SOL summary (native+WSOL): in={sol_in:.6f}, out={sol_out:.6f}, net={net_sol:.6f}")
         
         # Find token changes for this wallet
         for i, transfer in enumerate(token_transfers):
