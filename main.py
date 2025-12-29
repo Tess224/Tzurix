@@ -52,7 +52,7 @@ BIRDEYE_API_KEY = os.environ.get('BIRDEYE_API_KEY')
 
 STARTING_SCORE = 10
 TOTAL_SUPPLY = 100_000_000  # 100M tokens per agent stock
-DAILY_SCORE_CAP = 0.10  # ±10% max daily change
+DAILY_SCORE_CAP = 0.35  # ±35% max daily change
 
 # SOL-based pricing (assuming $150/SOL baseline for initial calc)
 # Starting: Score 10 = 66.7 SOL market cap = ~$10k at $150/SOL
