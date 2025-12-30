@@ -2,7 +2,7 @@
 Tzurix MVP Backends
 AI Agent Performance Exchange - Where Price = Score
 
-Started: December 26, 2024
+Started: December 26, 2025
 Network: Solana Devnet (testnet)
 """
 
