@@ -369,8 +369,7 @@ def home():
             'starting_score': STARTING_SCORE,
             'price_multiplier': PRICE_MULTIPLIER,
             'total_supply': TOTAL_SUPPLY,
-            'price_formula': 'Score × $0.01 per 1,000 tokens'
-
+            'price_formula': 'Score × $0.01 per 1,000 tokens',
             'daily_score_cap': f'±{int(DAILY_SCORE_CAP * 100)}%'
         },
         'endpoints': {
