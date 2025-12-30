@@ -115,6 +115,7 @@ class Agent(db.Model):
         # USD values for display
         price_usd = price_sol * SOL_PRICE_USD
         market_cap_usd = market_cap_sol * SOL_PRICE_USD
+        display_price = self.current_score * 0.01  # Price per 1K tokens
         
         return {
             'id': self.id,
@@ -127,6 +128,7 @@ class Agent(db.Model):
             'price_lamports': price_lamports,
             'price_sol': price_sol,
             'price_usd': price_usd,
+            'display_price': display_price,
             'market_cap_sol': market_cap_sol,
             'market_cap_usd': market_cap_usd,
             'token_mint': self.token_mint,
@@ -314,12 +316,14 @@ def calculate_price(score: int) -> dict:
     price_usd = price_sol * sol_price_usd
     market_cap_sol = price_sol * TOTAL_SUPPLY
     market_cap_usd = market_cap_sol * sol_price_usd
+    display_price = score * 0.01  # Price per 1K tokens
     
     return {
         'score': score,
         'price_lamports': price_lamports,
         'price_sol': price_sol,
         'price_usd': price_usd,
+        'display_price': display_price,
         'market_cap_sol': market_cap_sol,
         'market_cap_usd': market_cap_usd,
         'sol_price_usd': sol_price_usd
@@ -328,7 +332,7 @@ def calculate_price(score: int) -> dict:
 
 def apply_daily_cap(current_score: int, new_raw_score: int) -> int:
     """
-    Apply ±10% daily cap to score changes.
+    Apply ±35% daily cap to score changes.
     
     This protects reserve liquidity by preventing sudden large price swings.
     """
@@ -365,6 +369,8 @@ def home():
             'starting_score': STARTING_SCORE,
             'price_multiplier': PRICE_MULTIPLIER,
             'total_supply': TOTAL_SUPPLY,
+            'price_formula': 'Score × $0.01 per 1,000 tokens'
+
             'daily_score_cap': f'±{int(DAILY_SCORE_CAP * 100)}%'
         },
         'endpoints': {
