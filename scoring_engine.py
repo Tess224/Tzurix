@@ -37,7 +37,7 @@ HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 # Scoring constants
 STARTING_SCORE = 10
-DAILY_SCORE_CAP = 0.10  # ±10%
+DAILY_SCORE_CAP = 0.35  # ±35%
 MIN_SCORE = 1
 
 # Known DEX program IDs for identifying swaps
