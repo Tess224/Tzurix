@@ -66,7 +66,12 @@ LAMPORTS_PER_SCORE_POINT = 67  # 67 lamports per score point
 # 100M × 0.00000067 = 67 SOL MC ≈ $10k at $150/SOL ✓
 
 SOL_PRICE_USD = 150  # For frontend USD conversion only
+# Admin & Cron authentication
+ADMIN_KEY = os.environ.get('ADMIN_KEY', 'tzurix-dev-admin')
+CRON_SECRET = os.environ.get('CRON_SECRET', 'tzurix-cron-secret')
 
+# Agent types
+VALID_AGENT_TYPES = ['trading', 'social', 'defi', 'utility']
 # ============================================================================
 # DATABASE MODELS
 # ============================================================================
@@ -87,13 +92,24 @@ class Agent(db.Model):
     # Score data
     current_score = db.Column(db.Integer, default=STARTING_SCORE)
     previous_score = db.Column(db.Integer, default=STARTING_SCORE)
+    raw_score = db.Column(db.Integer, default=STARTING_SCORE)  # Before cap
+    was_capped = db.Column(db.Boolean, default=False)
     
+    # Agent classification
+    agent_type = db.Column(db.String(20), default='trading')  # trading/social/defi/utility
+    category = db.Column(db.String(20), default='agent')  # agent or individual
     # Token data (will be populated after Solana deployment)
     token_mint = db.Column(db.String(44))
     total_supply = db.Column(db.BigInteger, default=TOTAL_SUPPLY)
     
     # Reserve in lamports (1 SOL = 1,000,000,000 lamports)
     reserve_lamports = db.Column(db.BigInteger, default=0)
+
+    # Stats (updated by cron)
+    holders = db.Column(db.Integer, default=0)
+    volume_24h = db.Column(db.Float, default=0)
+    total_volume = db.Column(db.Float, default=0)
+    last_score_update = db.Column(db.DateTime, default=datetime.utcnow)
     
     # Status
     is_active = db.Column(db.Boolean, default=True)
@@ -125,6 +141,14 @@ class Agent(db.Model):
             'creator_wallet': self.creator_wallet,
             'current_score': self.current_score,
             'previous_score': self.previous_score,
+            'raw_score': self.raw_score,
+            'was_capped': self.was_capped,
+            'type': self.agent_type,
+            'category': self.category,
+            'holders': self.holders,
+            'volume_24h': self.volume_24h,
+            'total_volume': self.total_volume,
+            'last_score_update': self.last_score_update.isoformat() if self.last_score_update else None,
             'price_lamports': price_lamports,
             'price_sol': price_sol,
             'price_usd': price_usd,
@@ -182,21 +206,26 @@ class Trade(db.Model):
     side = db.Column(db.String(4), nullable=False)  # 'buy' or 'sell'
     token_amount = db.Column(db.BigInteger, nullable=False)
     sol_amount = db.Column(db.BigInteger, nullable=False)  # in lamports
-    price_at_trade = db.Column(db.Float)  # USD price per token
+    price_at_trade = db.Column(db.Float)  # SOL price per token
+    score_at_trade = db.Column(db.Integer)  # Score at time of trade
     
     tx_signature = db.Column(db.String(88))  # Solana transaction signature
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def to_dict(self):
+        agent = Agent.query.get(self.agent_id)
         return {
             'id': self.id,
             'agent_id': self.agent_id,
+            'agent_name': agent.name if agent else None,
             'trader_wallet': self.trader_wallet,
             'side': self.side,
             'token_amount': self.token_amount,
             'sol_amount': self.sol_amount,
+            'sol_amount_display': self.sol_amount / 1_000_000_000,
             'price_at_trade': self.price_at_trade,
+            'score_at_trade': self.score_at_trade,
             'tx_signature': self.tx_signature,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
@@ -350,8 +379,36 @@ def apply_daily_cap(current_score: int, new_raw_score: int) -> int:
     
     # Minimum score is 1
     return max(1, new_score)
+    
 
-
+def update_agent_stats():
+    """Update holder counts and 24h volume for all agents."""
+    try:
+        twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+        
+        agents = Agent.query.filter_by(is_active=True).all()
+        for agent in agents:
+            # Count unique holders with tokens > 0
+            holders = Holding.query.filter(
+                Holding.agent_id == agent.id,
+                Holding.token_amount > 0
+            ).count()
+            agent.holders = holders
+            
+            # Calculate 24h volume in USD
+            recent_trades = Trade.query.filter(
+                Trade.agent_id == agent.id,
+                Trade.created_at >= twenty_four_hours_ago
+            ).all()
+            volume_24h = sum(t.sol_amount for t in recent_trades) / 1_000_000_000 * SOL_PRICE_USD
+            agent.volume_24h = volume_24h
+        
+        db.session.commit()
+        logger.info(f"📊 Updated stats for {len(agents)} agents")
+    except Exception as e:
+        logger.error(f"Error updating agent stats: {e}")
+        db.session.rollback()
+        
 # ============================================================================
 # API ENDPOINTS - HEALTH & INFO
 # ============================================================================
@@ -379,7 +436,11 @@ def home():
             'get_quote': '/api/trade/quote',
             'buy': 'POST /api/trade/buy',
             'sell': 'POST /api/trade/sell',
-            'user_holdings': '/api/user/<wallet>/holdings'
+            'user_holdings': '/api/user/<wallet>/holdings',
+            'user_transactions': '/api/user/<wallet>/transactions',
+            'leaderboard': '/api/leaderboard',
+            'cron_scores': 'POST /api/cron/update-all-scores',
+            'cron_stats': 'POST /api/cron/update-stats'
         }
     })
 
@@ -405,20 +466,39 @@ def get_agents():
     List all registered agents.
     
     Query params:
-        - sort: 'score', 'newest', 'name' (default: score)
+        - sort: 'score', 'newest', 'name', 'volume', 'holders' (default: score)
+        - type: filter by agent type (trading, social, defi, utility)
+        - category: filter by category (agent, individual)
         - limit: number of results (default: 50)
     """
     sort = request.args.get('sort', 'score')
+    agent_type = request.args.get('type')
+    category = request.args.get('category')
     limit = min(int(request.args.get('limit', 50)), 100)
     
     query = Agent.query.filter_by(is_active=True)
     
+    # Filter by type if provided
+    if agent_type and agent_type in VALID_AGENT_TYPES:
+        query = query.filter_by(agent_type=agent_type)
+    
+    # Filter by category if provided
+    if category and category in ['agent', 'individual']:
+        query = query.filter_by(category=category)
+    
+    # Sort
     if sort == 'score':
         query = query.order_by(Agent.current_score.desc())
     elif sort == 'newest':
         query = query.order_by(Agent.created_at.desc())
     elif sort == 'name':
         query = query.order_by(Agent.name.asc())
+    elif sort == 'volume':
+        query = query.order_by(Agent.volume_24h.desc())
+    elif sort == 'holders':
+        query = query.order_by(Agent.holders.desc())
+    else:
+        query = query.order_by(Agent.current_score.desc())
     
     agents = query.limit(limit).all()
     
@@ -427,7 +507,6 @@ def get_agents():
         'count': len(agents),
         'agents': [agent.to_dict() for agent in agents]
     })
-
 
 @app.route('/api/agents/<int:agent_id>', methods=['GET'])
 def get_agent(agent_id):
@@ -487,6 +566,22 @@ def register_agent():
                 'error': f'Missing required field: {field}'
             }), 400
     
+    # Validate agent type
+    agent_type = data.get('type', 'trading')
+    if agent_type not in VALID_AGENT_TYPES:
+        return jsonify({
+            'success': False,
+            'error': f'Invalid agent type. Must be one of: {VALID_AGENT_TYPES}'
+        }), 400
+    
+    # Validate category
+    category = data.get('category', 'agent')
+    if category not in ['agent', 'individual']:
+        return jsonify({
+            'success': False,
+            'error': 'Invalid category. Must be "agent" or "individual"'
+        }), 400
+    
     # Check if agent already exists
     existing = Agent.query.filter_by(wallet_address=data['wallet_address']).first()
     if existing:
@@ -501,8 +596,11 @@ def register_agent():
         name=data['name'],
         description=data.get('description', ''),
         creator_wallet=data['creator_wallet'],
+        agent_type=agent_type,
+        category=category,
         current_score=STARTING_SCORE,
-        previous_score=STARTING_SCORE
+        previous_score=STARTING_SCORE,
+        raw_score=STARTING_SCORE
     )
     
     db.session.add(agent)
@@ -579,7 +677,66 @@ def get_agent_history(agent_id):
         'history': [h.to_dict() for h in history]
     })
 
+# ============================================================================
+# API ENDPOINTS - LEADERBOARD
+# ============================================================================
 
+@app.route('/api/leaderboard', methods=['GET'])
+def get_leaderboard():
+    """
+    Get top agents by various metrics.
+    
+    Query params:
+        - metric: 'score', 'gainers', 'volume', 'holders' (default: score)
+        - type: filter by agent type (optional)
+        - limit: number of results (default: 10, max: 50)
+    """
+    metric = request.args.get('metric', 'score')
+    agent_type = request.args.get('type')
+    limit = min(int(request.args.get('limit', 10)), 50)
+    
+    query = Agent.query.filter_by(is_active=True)
+    
+    if agent_type and agent_type in VALID_AGENT_TYPES:
+        query = query.filter_by(agent_type=agent_type)
+    
+    if metric == 'score':
+        query = query.order_by(Agent.current_score.desc())
+    elif metric == 'gainers':
+        # Calculate percentage gain and sort
+        agents = query.all()
+        agents_with_gain = []
+        for a in agents:
+            if a.previous_score and a.previous_score > 0:
+                gain = (a.current_score - a.previous_score) / a.previous_score * 100
+            else:
+                gain = 0
+            agents_with_gain.append((a, gain))
+        agents_with_gain.sort(key=lambda x: x[1], reverse=True)
+        top_agents = [a for a, _ in agents_with_gain[:limit]]
+        
+        return jsonify({
+            'success': True,
+            'metric': metric,
+            'count': len(top_agents),
+            'agents': [a.to_dict() for a in top_agents]
+        })
+    elif metric == 'volume':
+        query = query.order_by(Agent.volume_24h.desc())
+    elif metric == 'holders':
+        query = query.order_by(Agent.holders.desc())
+    else:
+        query = query.order_by(Agent.current_score.desc())
+    
+    agents = query.limit(limit).all()
+    
+    return jsonify({
+        'success': True,
+        'metric': metric,
+        'count': len(agents),
+        'agents': [a.to_dict() for a in agents]
+    })
+    
 # ============================================================================
 # API ENDPOINTS - TRADING
 # ============================================================================
@@ -716,7 +873,8 @@ def buy_tokens():
         side='buy',
         token_amount=tokens_received,
         sol_amount=sol_lamports,
-        price_at_trade=price_data['price_sol'],  # Store SOL price
+        price_at_trade=price_data['price_sol'],# Store SOL price
+        score_at_trade=agent.current_score,
         tx_signature=tx_signature
     )
     db.session.add(trade)
@@ -825,6 +983,7 @@ def sell_tokens():
         token_amount=token_amount,
         sol_amount=sol_lamports,
         price_at_trade=price_data['price_usd'],
+        score_at_trade=agent.current_score,
         tx_signature=tx_signature
     )
     db.session.add(trade)
@@ -896,6 +1055,36 @@ def get_user_holdings(wallet_address):
         'total_value_usd': total_value_usd
     })
 
+@app.route('/api/user/<wallet_address>/transactions', methods=['GET'])
+def get_user_transactions(wallet_address):
+    """
+    Get transaction history for a user.
+    
+    Query params:
+        - limit: number of results (default: 50, max: 100)
+        - offset: pagination offset (default: 0)
+        - agent_id: filter by specific agent (optional)
+    """
+    limit = min(int(request.args.get('limit', 50)), 100)
+    offset = int(request.args.get('offset', 0))
+    agent_id = request.args.get('agent_id', type=int)
+    
+    query = Trade.query.filter_by(trader_wallet=wallet_address)
+    
+    if agent_id:
+        query = query.filter_by(agent_id=agent_id)
+    
+    total = query.count()
+    trades = query.order_by(Trade.created_at.desc()).offset(offset).limit(limit).all()
+    
+    return jsonify({
+        'success': True,
+        'wallet_address': wallet_address,
+        'transactions': [t.to_dict() for t in trades],
+        'total': total,
+        'limit': limit,
+        'offset': offset
+    })
 
 # ============================================================================
 # API ENDPOINTS - ADMIN / SCORING
@@ -1105,7 +1294,165 @@ def refresh_agent_score(agent_id):
             'success': False,
             'error': str(e)
         }), 500
+# ============================================================================
+# API ENDPOINTS - CRON / SCHEDULED TASKS
+# ============================================================================
 
+@app.route('/api/cron/update-all-scores', methods=['POST'])
+def cron_update_all_scores():
+    """
+    Cron endpoint: Update scores for all active agents.
+    
+    Call daily with external scheduler (cron-job.org, Railway cron, etc.)
+    Protected by CRON_SECRET environment variable.
+    
+    Authorization options:
+        Header: Authorization: Bearer {CRON_SECRET}
+        Body: {"cron_secret": "{CRON_SECRET}"}
+    """
+    # Verify authorization
+    auth_header = request.headers.get('Authorization', '')
+    body_data = request.get_json(silent=True) or {}
+    
+    provided_secret = None
+    if auth_header.startswith('Bearer '):
+        provided_secret = auth_header[7:]
+    elif body_data.get('cron_secret'):
+        provided_secret = body_data.get('cron_secret')
+    
+    if provided_secret != CRON_SECRET:
+        return jsonify({
+            'success': False,
+            'error': 'Unauthorized'
+        }), 401
+    
+    try:
+        from scoring_engine import calculate_agent_score, HELIUS_API_KEY as SCORING_HELIUS_KEY
+        
+        if not SCORING_HELIUS_KEY:
+            return jsonify({
+                'success': False,
+                'error': 'Helius API key not configured'
+            }), 500
+        
+        # Get all active agents
+        agents = Agent.query.filter_by(is_active=True).all()
+        
+        results = {
+            'updated': [],
+            'failed': [],
+            'skipped': []
+        }
+        
+        for agent in agents:
+            try:
+                # Calculate new score from on-chain data
+                result = calculate_agent_score(
+                    wallet_address=agent.wallet_address,
+                    previous_score=agent.current_score
+                )
+                
+                # Update agent record
+                agent.previous_score = agent.current_score
+                agent.raw_score = result.raw_score
+                agent.current_score = result.final_score
+                agent.was_capped = result.capped
+                agent.last_score_update = datetime.utcnow()
+                
+                # Calculate new price for history
+                price_data = calculate_price(result.final_score)
+                
+                # Record in score history
+                history = ScoreHistory(
+                    agent_id=agent.id,
+                    score=result.final_score,
+                    raw_score=result.raw_score,
+                    price_usd=price_data['price_usd'],
+                    price_sol=price_data['price_sol']
+                )
+                db.session.add(history)
+                
+                results['updated'].append({
+                    'id': agent.id,
+                    'name': agent.name,
+                    'previous': agent.previous_score,
+                    'new': result.final_score,
+                    'capped': result.capped
+                })
+                
+                logger.info(f"✅ Cron: {agent.name} {agent.previous_score} → {result.final_score}")
+                
+            except Exception as e:
+                results['failed'].append({
+                    'id': agent.id,
+                    'name': agent.name,
+                    'error': str(e)
+                })
+                logger.error(f"❌ Cron failed for {agent.name}: {e}")
+        
+        db.session.commit()
+        
+        # Also update holder/volume stats
+        update_agent_stats()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Cron job completed',
+            'timestamp': datetime.utcnow().isoformat(),
+            'summary': {
+                'total_agents': len(agents),
+                'updated': len(results['updated']),
+                'failed': len(results['failed']),
+                'skipped': len(results['skipped'])
+            },
+            'results': results
+        })
+        
+    except Exception as e:
+        logger.error(f"Cron job failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/cron/update-stats', methods=['POST'])
+def cron_update_stats():
+    """
+    Cron endpoint: Update holder counts and volume stats.
+    Can run more frequently than score updates (e.g., every 6 hours).
+    """
+    # Verify authorization
+    auth_header = request.headers.get('Authorization', '')
+    body_data = request.get_json(silent=True) or {}
+    
+    provided_secret = None
+    if auth_header.startswith('Bearer '):
+        provided_secret = auth_header[7:]
+    elif body_data.get('cron_secret'):
+        provided_secret = body_data.get('cron_secret')
+    
+    if provided_secret != CRON_SECRET:
+        return jsonify({
+            'success': False,
+            'error': 'Unauthorized'
+        }), 401
+    
+    try:
+        update_agent_stats()
+        return jsonify({
+            'success': True,
+            'message': 'Stats updated',
+            'timestamp': datetime.utcnow().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+        
 # ============================================================================
 # DATABASE INITIALIZATION
 # ============================================================================
