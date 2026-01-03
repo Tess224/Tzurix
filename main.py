@@ -905,6 +905,9 @@ def buy_tokens():
     
     # Update agent reserve
     agent.reserve_lamports += sol_lamports
+
+    # Update last trade time for tiered scoring
+    agent.last_trade_at = datetime.utcnow()
     
     db.session.commit()
     
@@ -1000,6 +1003,9 @@ def sell_tokens():
     
     # Update agent reserve
     agent.reserve_lamports -= sol_lamports
+
+    # Update last trade time for tiered scoring
+    agent.last_trade_at = datetime.utcnow()
     
     db.session.commit()
     
@@ -1459,7 +1465,245 @@ def cron_update_stats():
             'success': False,
             'error': str(e)
         }), 500
+
+# ============================================================================
+# SCHEDULER - Tiered Score Updates (Add this entire section)
+# ============================================================================
+
+def update_single_agent_score(agent):
+    """Update score for a single agent using scoring_engine"""
+    try:
+        from scoring_engine import calculate_agent_score, HELIUS_API_KEY as SCORING_HELIUS_KEY
         
+        if not SCORING_HELIUS_KEY:
+            logger.warning(f"[Scheduler] No Helius API key - skipping {agent.name}")
+            return False
+        
+        result = calculate_agent_score(
+            wallet_address=agent.wallet_address,
+            previous_score=agent.current_score
+        )
+        
+        if result:
+            # Update agent record
+            agent.previous_score = agent.current_score
+            agent.raw_score = result.raw_score
+            agent.current_score = result.final_score
+            agent.was_capped = result.capped
+            agent.last_score_update = datetime.utcnow()
+            
+            # Calculate new price for history
+            price_data = calculate_price(result.final_score)
+            
+            # Record in score history
+            history = ScoreHistory(
+                agent_id=agent.id,
+                score=result.final_score,
+                raw_score=result.raw_score,
+                price_usd=price_data['price_usd'],
+                price_sol=price_data['price_sol']
+            )
+            db.session.add(history)
+            return True
+            
+    except Exception as e:
+        logger.error(f"[Scheduler] Error updating {agent.name}: {e}")
+    return False
+
+
+def scheduled_tiered_score_update():
+    """
+    Tiered score updates based on trading activity:
+    - Hot (traded in last hour): Always update
+    - Active (traded in last 24h): Update if not updated in 10 min
+    - Idle (no recent trades): Update if not updated in 1 hour
+    """
+    with app.app_context():
+        try:
+            now = datetime.utcnow()
+            updated_count = 0
+            
+            all_agents = Agent.query.filter_by(is_active=True).all()
+            
+            for agent in all_agents:
+                should_update = False
+                
+                last_trade = agent.last_trade_at or datetime(2000, 1, 1)
+                last_update = agent.last_score_update or datetime(2000, 1, 1)
+                
+                hours_since_trade = (now - last_trade).total_seconds() / 3600
+                minutes_since_update = (now - last_update).total_seconds() / 60
+                
+                if hours_since_trade <= 1:
+                    # HOT: traded in last hour - always update
+                    should_update = True
+                    tier = "HOT"
+                elif hours_since_trade <= 24:
+                    # ACTIVE: traded in last 24h - update every 10 min
+                    should_update = minutes_since_update >= 10
+                    tier = "ACTIVE"
+                else:
+                    # IDLE: no recent trades - update every hour
+                    should_update = minutes_since_update >= 60
+                    tier = "IDLE"
+                
+                if should_update:
+                    if update_single_agent_score(agent):
+                        updated_count += 1
+                        logger.info(f"[Scheduler] Updated {agent.name} ({tier}): {agent.previous_score} → {agent.current_score}")
+                    time.sleep(0.5)  # Rate limit protection
+            
+            db.session.commit()
+            logger.info(f"[Scheduler] Tiered update complete: {updated_count}/{len(all_agents)} agents updated")
+            
+        except Exception as e:
+            logger.error(f"[Scheduler] Tiered update error: {e}")
+            db.session.rollback()
+
+
+def scheduled_daily_weight_reset():
+    """Reset daily weight parameters at 00:00 UTC"""
+    with app.app_context():
+        try:
+            agent_types = ['trading', 'social', 'defi', 'utility']
+            
+            for agent_type in agent_types:
+                if agent_type == 'trading':
+                    modifiers = {
+                        'pnl': round(0.7 + random.random() * 0.6, 2),
+                        'win_rate': round(0.7 + random.random() * 0.6, 2),
+                        'risk_adjusted': round(0.7 + random.random() * 0.6, 2),
+                        'drawdown': round(0.7 + random.random() * 0.6, 2),
+                        'consistency': round(0.7 + random.random() * 0.6, 2),
+                        'uptime': round(0.7 + random.random() * 0.6, 2),
+                    }
+                elif agent_type == 'social':
+                    modifiers = {
+                        'engagement': round(0.7 + random.random() * 0.6, 2),
+                        'follower_growth': round(0.7 + random.random() * 0.6, 2),
+                        'content_quality': round(0.7 + random.random() * 0.6, 2),
+                        'response_quality': round(0.7 + random.random() * 0.6, 2),
+                        'virality': round(0.7 + random.random() * 0.6, 2),
+                        'consistency': round(0.7 + random.random() * 0.6, 2),
+                    }
+                else:
+                    modifiers = {
+                        'performance': round(0.7 + random.random() * 0.6, 2),
+                        'reliability': round(0.7 + random.random() * 0.6, 2),
+                        'efficiency': round(0.7 + random.random() * 0.6, 2),
+                    }
+                logger.info(f"[Scheduler] Daily modifiers for {agent_type}: {modifiers}")
+            
+            logger.info(f"[Scheduler] Daily weight parameters reset at {datetime.utcnow()}")
+            
+        except Exception as e:
+            logger.error(f"[Scheduler] Daily weight reset error: {e}")
+
+
+def scheduled_stats_update():
+    """Update holder counts and 24h volume for all agents"""
+    with app.app_context():
+        try:
+            update_agent_stats()  # Uses your existing function
+            logger.info("[Scheduler] Stats update completed")
+        except Exception as e:
+            logger.error(f"[Scheduler] Stats update error: {e}")
+
+
+# Global scheduler instance
+scheduler = None
+
+def start_scheduler():
+    """Initialize and start the background scheduler"""
+    global scheduler
+    
+    if scheduler is not None:
+        logger.info("[Scheduler] Already running")
+        return
+    
+    scheduler = BackgroundScheduler(daemon=True)
+    
+    # Tiered score updates - every 2 minutes
+    scheduler.add_job(
+        scheduled_tiered_score_update,
+        IntervalTrigger(minutes=2),
+        id='tiered_score_update',
+        replace_existing=True,
+        max_instances=1
+    )
+    
+    # Daily weight reset - 00:00 UTC
+    scheduler.add_job(
+        scheduled_daily_weight_reset,
+        CronTrigger(hour=0, minute=0),
+        id='daily_weight_reset',
+        replace_existing=True
+    )
+    
+    # Stats update (holders, volume) - every 30 minutes
+    scheduler.add_job(
+        scheduled_stats_update,
+        IntervalTrigger(minutes=30),
+        id='stats_update',
+        replace_existing=True,
+        max_instances=1
+    )
+    
+    scheduler.start()
+    logger.info("[Scheduler] ✅ Started successfully!")
+    logger.info("  - Tiered score updates: every 2 minutes")
+    logger.info("  - Daily weight reset: 00:00 UTC")
+    logger.info("  - Stats update: every 30 minutes")
+
+
+def stop_scheduler():
+    """Stop the scheduler gracefully"""
+    global scheduler
+    if scheduler:
+        scheduler.shutdown()
+        scheduler = None
+        logger.info("[Scheduler] Stopped")
+
+# ============================================================================
+# API ENDPOINTS - SCHEDULER ADMIN
+# ============================================================================
+
+@app.route('/api/admin/trigger-score-update', methods=['POST'])
+def admin_trigger_score_update():
+    """Manually trigger a score update cycle"""
+    admin_key = request.headers.get('X-Admin-Key') or (request.get_json(silent=True) or {}).get('admin_key')
+    if admin_key != ADMIN_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    from threading import Thread
+    Thread(target=scheduled_tiered_score_update).start()
+    
+    return jsonify({
+        "success": True,
+        "message": "Score update cycle started in background"
+    })
+
+
+@app.route('/api/admin/scheduler-status', methods=['GET'])
+def admin_scheduler_status():
+    """Check scheduler status"""
+    global scheduler
+    
+    if scheduler is None:
+        return jsonify({"status": "not_running", "jobs": []})
+    
+    jobs = []
+    for job in scheduler.get_jobs():
+        jobs.append({
+            "id": job.id,
+            "next_run": str(job.next_run_time) if job.next_run_time else None
+        })
+    
+    return jsonify({
+        "status": "running",
+        "jobs": jobs
+    })
+    
 # ============================================================================
 # DATABASE INITIALIZATION
 # ============================================================================
@@ -1478,6 +1722,12 @@ def init_db():
 # Initialize database on startup
 init_db()
 
+# Start the scheduler (only in production/Railway or when explicitly enabled)
+if os.environ.get('RAILWAY_ENVIRONMENT') or os.environ.get('START_SCHEDULER', 'false').lower() == 'true':
+    start_scheduler()
+
 if __name__ == '__main__':
+    # Start scheduler when running directly
+    start_scheduler()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
