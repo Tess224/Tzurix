@@ -14,6 +14,11 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from scoring_api import scoring_bp
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
+import time
+import random
 import requests
 
 # ============================================================================
@@ -121,6 +126,8 @@ class Agent(db.Model):
     # Relationships
     score_history = db.relationship('ScoreHistory', backref='agent', lazy='dynamic')
     trades = db.relationship('Trade', backref='agent', lazy='dynamic')
+    # ADD THIS FIELD (for tiered updates)
+    last_trade_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def to_dict(self):
         """Convert agent to dictionary for JSON response."""
