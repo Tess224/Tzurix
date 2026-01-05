@@ -95,9 +95,9 @@ class Agent(db.Model):
     creator_wallet = db.Column(db.String(44), nullable=False)
     
     # Score data
-    current_score = db.Column(db.Integer, default=STARTING_SCORE)
-    previous_score = db.Column(db.Integer, default=STARTING_SCORE)
-    raw_score = db.Column(db.Integer, default=STARTING_SCORE)  # Before cap
+    current_score = db.Column(db.Float, default=STARTING_SCORE)
+    previous_score = db.Column(db.Float, default=STARTING_SCORE)
+    raw_score = db.Column(db.Float, default=STARTING_SCORE)
     was_capped = db.Column(db.Boolean, default=False)
     
     # Agent classification
@@ -181,8 +181,8 @@ class ScoreHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     agent_id = db.Column(db.Integer, db.ForeignKey('agents.id'), nullable=False)
     
-    score = db.Column(db.Integer, nullable=False)
-    raw_score = db.Column(db.Integer)  # Before cap applied
+    score = db.Column(db.Float, nullable=False)
+    raw_score = db.Column(db.Float)  # Before cap applied
     price_usd = db.Column(db.Float)
     price_sol = db.Column(db.Float)
     
