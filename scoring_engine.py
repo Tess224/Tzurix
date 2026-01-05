@@ -591,7 +591,7 @@ def calculate_raw_score(metrics: TradingMetrics) -> int:
     return max(1, int(raw_score))
 
 
-def apply_daily_cap(current_score: int, raw_score: int) -> Tuple[int, bool]:
+def apply_daily_cap(current_score: float, raw_score: float) -> Tuple[float, bool]:
     """
     Apply ±10% daily cap to score changes.
     
@@ -615,8 +615,7 @@ def apply_daily_cap(current_score: int, raw_score: int) -> Tuple[int, bool]:
         capped_change = change_percent
     
     # Calculate final score
-    final_score = int(current_score * (1 + capped_change))
-    
+    final_score = current_score * (1 + capped_change)
     # Ensure minimum score
     return max(MIN_SCORE, final_score), capped
 
