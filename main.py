@@ -1,9 +1,18 @@
 """
-Tzurix MVP Backends
+Tzurix MVP Backend - V1 Arena Update
 AI Agent Performance Exchange - Where Price = Score
 
 Started: December 26, 2025
+V1 Update: January 2026
 Network: Solana Devnet (testnet)
+
+V1 CHANGES:
+- Starting score: 10 → 20
+- Daily cap: ±35% → ±5 points (absolute)
+- wallet_address: Required → Optional
+- Added: tier system (alpha/beta/omega)
+- Added: interface_code for arena testing
+- Added: new endpoints (/api/tiers, /arena, /tier, /interface)
 """
 
 import os
@@ -52,31 +61,72 @@ HELIUS_API_KEY = os.environ.get('HELIUS_API_KEY')
 BIRDEYE_API_KEY = os.environ.get('BIRDEYE_API_KEY')
 
 # ============================================================================
-# CORE CONSTANTS
+# CORE CONSTANTS (V1 Updated)
 # ============================================================================
 
-STARTING_SCORE = 10
+# V1: Starting score changed from 10 to 20
+STARTING_SCORE = 20
+
 TOTAL_SUPPLY = 100_000_000  # 100M tokens per agent stock
+
+# Legacy cap (kept for backward compatibility)
 DAILY_SCORE_CAP = 0.35  # ±35% max daily change
 
-# SOL-based pricing (assuming $150/SOL baseline for initial calc)
-# Starting: Score 10 = 66.7 SOL market cap = ~$10k at $150/SOL
-# Formula: Price in SOL = Score × LAMPORTS_PER_SCORE_POINT / 1e9
-LAMPORTS_PER_SCORE_POINT = 667  # 667 lamports per score point
-# So Score 10 = 6,670 lamports = 0.00000667 SOL per token
-# 100M tokens × 0.00000667 SOL = 667 SOL MC (but we want 66.7 SOL)
-# Correction: 66.7 lamports per score point
-LAMPORTS_PER_SCORE_POINT = 67  # 67 lamports per score point
-# Score 10 = 670 lamports = 0.00000067 SOL per token
-# 100M × 0.00000067 = 67 SOL MC ≈ $10k at $150/SOL ✓
+# V1: New absolute point cap
+DAILY_POINT_CAP = 5  # ±5 points max daily change
+MIN_SCORE = 1
+MAX_SCORE = 100
 
+# SOL-based pricing
+LAMPORTS_PER_SCORE_POINT = 67  # 67 lamports per score point
 SOL_PRICE_USD = 150  # For frontend USD conversion only
+
 # Admin & Cron authentication
 ADMIN_KEY = os.environ.get('ADMIN_KEY', 'tzurix-dev-admin')
 CRON_SECRET = os.environ.get('CRON_SECRET', 'tzurix-cron-secret')
 
 # Agent types
 VALID_AGENT_TYPES = ['trading', 'social', 'defi', 'utility']
+
+# ============================================================================
+# V1: TIER SYSTEM
+# ============================================================================
+
+TIERS = {
+    'alpha': {
+        'name': 'Alpha',
+        'emoji': '🛡️',
+        'difficulty': 'Standard',
+        'max_score': 75,
+        'description': 'Standard difficulty - recommended for new agents',
+    },
+    'beta': {
+        'name': 'Beta',
+        'emoji': '⚔️',
+        'difficulty': 'Advanced',
+        'max_score': 90,
+        'description': 'Advanced difficulty - harder scenarios, higher ceiling',
+    },
+    'omega': {
+        'name': 'Omega',
+        'emoji': '👑',
+        'difficulty': 'Elite',
+        'max_score': 100,
+        'description': 'Elite difficulty - extreme scenarios, maximum potential',
+    },
+}
+
+
+def get_tier_config(tier_name: str) -> dict:
+    """Get configuration for a tier."""
+    return TIERS.get(tier_name.lower(), TIERS['alpha'])
+
+
+def get_tier_max_score(tier_name: str) -> int:
+    """Get maximum score for a tier."""
+    return get_tier_config(tier_name)['max_score']
+
+
 # ============================================================================
 # DATABASE MODELS
 # ============================================================================
@@ -85,29 +135,56 @@ class Agent(db.Model):
     """
     Represents a registered AI trading agent.
     Each agent gets a tokenized stock with price tied to their score.
+    
+    V1 CHANGES:
+    - wallet_address is now optional (nullable=True)
+    - Added tier system fields
+    - Added interface_code for arena testing
+    - Added social links
     """
     __tablename__ = 'agents'
     
     id = db.Column(db.Integer, primary_key=True)
-    wallet_address = db.Column(db.String(44), unique=True, nullable=False)
+    
+    # V1: wallet_address is now OPTIONAL
+    wallet_address = db.Column(db.String(44), unique=True, nullable=True)
+    
     name = db.Column(db.String(100), nullable=False)
     description = db.Column(db.Text)
     creator_wallet = db.Column(db.String(44), nullable=False)
     
-    # Score data
+    # Score data (V1: default is now 20)
     current_score = db.Column(db.Float, default=STARTING_SCORE)
     previous_score = db.Column(db.Float, default=STARTING_SCORE)
     raw_score = db.Column(db.Float, default=STARTING_SCORE)
     was_capped = db.Column(db.Boolean, default=False)
     
     # Agent classification
-    agent_type = db.Column(db.String(20), default='trading')  # trading/social/defi/utility
-    category = db.Column(db.String(20), default='agent')  # agent or individual
-    # Token data (will be populated after Solana deployment)
+    agent_type = db.Column(db.String(20), default='trading')
+    category = db.Column(db.String(20), default='agent')
+    
+    # V1: Tier system
+    tier = db.Column(db.String(10), default='alpha')
+    
+    # V1: Decision interface for arena testing
+    interface_type = db.Column(db.String(20))
+    interface_code = db.Column(db.Text)
+    interface_version = db.Column(db.Integer, default=1)
+    interface_validated = db.Column(db.Boolean, default=False)
+    interface_updated_at = db.Column(db.DateTime)
+    
+    # V1: Arena tracking
+    last_arena_run = db.Column(db.DateTime)
+    last_activity_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # V1: Social links
+    twitter_handle = db.Column(db.String(50))
+    github_url = db.Column(db.String(200))
+    website_url = db.Column(db.String(200))
+    
+    # Token data
     token_mint = db.Column(db.String(44))
     total_supply = db.Column(db.BigInteger, default=TOTAL_SUPPLY)
-    
-    # Reserve in lamports (1 SOL = 1,000,000,000 lamports)
     reserve_lamports = db.Column(db.BigInteger, default=0)
 
     # Stats (updated by cron)
@@ -115,6 +192,7 @@ class Agent(db.Model):
     volume_24h = db.Column(db.Float, default=0)
     total_volume = db.Column(db.Float, default=0)
     last_score_update = db.Column(db.DateTime, default=datetime.utcnow)
+    last_trade_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     # Status
     is_active = db.Column(db.Boolean, default=True)
@@ -126,8 +204,6 @@ class Agent(db.Model):
     # Relationships
     score_history = db.relationship('ScoreHistory', backref='agent', lazy='dynamic')
     trades = db.relationship('Trade', backref='agent', lazy='dynamic')
-    # ADD THIS FIELD (for tiered updates)
-    last_trade_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def to_dict(self):
         """Convert agent to dictionary for JSON response."""
@@ -138,7 +214,10 @@ class Agent(db.Model):
         # USD values for display
         price_usd = price_sol * SOL_PRICE_USD
         market_cap_usd = market_cap_sol * SOL_PRICE_USD
-        display_price = self.current_score * 0.01  # Price per 1K tokens
+        display_price = self.current_score * 0.01
+        
+        # V1: Get tier configuration
+        tier_config = get_tier_config(self.tier) if self.tier else TIERS['alpha']
         
         return {
             'id': self.id,
@@ -152,20 +231,52 @@ class Agent(db.Model):
             'was_capped': self.was_capped,
             'type': self.agent_type,
             'category': self.category,
+            
+            # V1: Tier info
+            'tier': self.tier or 'alpha',
+            'tier_info': {
+                'name': tier_config['name'],
+                'emoji': tier_config['emoji'],
+                'difficulty': tier_config['difficulty'],
+                'max_score': tier_config['max_score'],
+            },
+            'score_ceiling': tier_config['max_score'],
+            
+            # V1: Interface status
+            'has_interface': bool(self.interface_code),
+            'interface_validated': self.interface_validated or False,
+            
+            # V1: Social links
+            'twitter_handle': self.twitter_handle,
+            'github_url': self.github_url,
+            'website_url': self.website_url,
+            
+            # V1: Arena info
+            'last_arena_run': self.last_arena_run.isoformat() if self.last_arena_run else None,
+            
+            # Stats
             'holders': self.holders,
             'volume_24h': self.volume_24h,
             'total_volume': self.total_volume,
             'last_score_update': self.last_score_update.isoformat() if self.last_score_update else None,
+            
+            # Pricing
             'price_lamports': price_lamports,
             'price_sol': price_sol,
             'price_usd': price_usd,
             'display_price': display_price,
             'market_cap_sol': market_cap_sol,
             'market_cap_usd': market_cap_usd,
+            
+            # Token data
             'token_mint': self.token_mint,
             'total_supply': self.total_supply,
             'reserve_lamports': self.reserve_lamports,
+            
+            # Status
             'is_active': self.is_active,
+            
+            # Timestamps
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
@@ -182,7 +293,7 @@ class ScoreHistory(db.Model):
     agent_id = db.Column(db.Integer, db.ForeignKey('agents.id'), nullable=False)
     
     score = db.Column(db.Float, nullable=False)
-    raw_score = db.Column(db.Float)  # Before cap applied
+    raw_score = db.Column(db.Float)
     price_usd = db.Column(db.Float)
     price_sol = db.Column(db.Float)
     
@@ -210,13 +321,13 @@ class Trade(db.Model):
     agent_id = db.Column(db.Integer, db.ForeignKey('agents.id'), nullable=False)
     trader_wallet = db.Column(db.String(44), nullable=False)
     
-    side = db.Column(db.String(4), nullable=False)  # 'buy' or 'sell'
+    side = db.Column(db.String(4), nullable=False)
     token_amount = db.Column(db.BigInteger, nullable=False)
-    sol_amount = db.Column(db.BigInteger, nullable=False)  # in lamports
-    price_at_trade = db.Column(db.Float)  # SOL price per token
-    score_at_trade = db.Column(db.Integer)  # Score at time of trade
+    sol_amount = db.Column(db.BigInteger, nullable=False)
+    price_at_trade = db.Column(db.Float)
+    score_at_trade = db.Column(db.Integer)
     
-    tx_signature = db.Column(db.String(88))  # Solana transaction signature
+    tx_signature = db.Column(db.String(88))
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -269,7 +380,7 @@ class Holding(db.Model):
     agent_id = db.Column(db.Integer, db.ForeignKey('agents.id'), nullable=False)
     
     token_amount = db.Column(db.BigInteger, default=0)
-    avg_buy_price = db.Column(db.Float)  # Average price paid per token
+    avg_buy_price = db.Column(db.Float)
     
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -278,12 +389,10 @@ class Holding(db.Model):
     def to_dict(self):
         agent = Agent.query.get(self.agent_id)
         
-        # Calculate current price in SOL
         price_lamports = agent.current_score * LAMPORTS_PER_SCORE_POINT if agent else 0
         current_price_sol = price_lamports / 1_000_000_000
         current_value_sol = self.token_amount * current_price_sol
         
-        # USD for display
         current_price_usd = current_price_sol * SOL_PRICE_USD
         current_value_usd = current_value_sol * SOL_PRICE_USD
         
@@ -335,24 +444,15 @@ def get_sol_price_usd():
 def calculate_price(score: int) -> dict:
     """
     Calculate token price based on score.
-    
-    Price Formula (SOL-based): 
-        Price in lamports = Score × 67 lamports
-        Price in SOL = Score × 0.000000067 SOL
-    
-    Examples (at Score 10):
-        Price = 670 lamports = 0.00000067 SOL
-        MC = 100M × 0.00000067 = 67 SOL ≈ $10k at $150/SOL
     """
     price_lamports = score * LAMPORTS_PER_SCORE_POINT
     price_sol = price_lamports / 1_000_000_000
     
-    # Get USD price for display (frontend use)
     sol_price_usd = get_sol_price_usd()
     price_usd = price_sol * sol_price_usd
     market_cap_sol = price_sol * TOTAL_SUPPLY
     market_cap_usd = market_cap_sol * sol_price_usd
-    display_price = score * 0.01  # Price per 1K tokens
+    display_price = score * 0.01
     
     return {
         'score': score,
@@ -368,25 +468,43 @@ def calculate_price(score: int) -> dict:
 
 def apply_daily_cap(current_score: int, new_raw_score: int) -> int:
     """
-    Apply ±35% daily cap to score changes.
-    
-    This protects reserve liquidity by preventing sudden large price swings.
+    Apply ±35% daily cap to score changes (legacy function).
     """
     if current_score == 0:
         return max(1, new_raw_score)
     
-    # Calculate percentage change
     change_percent = (new_raw_score - current_score) / current_score
-    
-    # Cap at ±10%
     capped_change = max(-DAILY_SCORE_CAP, min(DAILY_SCORE_CAP, change_percent))
-    
-    # Calculate new score
     new_score = int(current_score * (1 + capped_change))
     
-    # Minimum score is 1
     return max(1, new_score)
+
+
+def apply_v1_score_change(current_score: float, raw_change: float, tier: str = 'alpha') -> tuple:
+    """
+    V1: Apply ±5 point daily cap and tier ceiling.
     
+    Returns: (new_score, was_capped)
+    """
+    # Cap the change at ±5 points
+    capped_change = max(-DAILY_POINT_CAP, min(DAILY_POINT_CAP, raw_change))
+    was_capped = abs(raw_change) > DAILY_POINT_CAP
+    
+    # Calculate new score
+    new_score = current_score + capped_change
+    
+    # Apply tier ceiling
+    tier_max = get_tier_max_score(tier)
+    if new_score > tier_max:
+        new_score = tier_max
+        was_capped = True
+    
+    # Apply floor
+    if new_score < MIN_SCORE:
+        new_score = MIN_SCORE
+    
+    return round(new_score, 1), was_capped
+
 
 def update_agent_stats():
     """Update holder counts and 24h volume for all agents."""
@@ -395,14 +513,12 @@ def update_agent_stats():
         
         agents = Agent.query.filter_by(is_active=True).all()
         for agent in agents:
-            # Count unique holders with tokens > 0
             holders = Holding.query.filter(
                 Holding.agent_id == agent.id,
                 Holding.token_amount > 0
             ).count()
             agent.holders = holders
             
-            # Calculate 24h volume in USD
             recent_trades = Trade.query.filter(
                 Trade.agent_id == agent.id,
                 Trade.created_at >= twenty_four_hours_ago
@@ -415,7 +531,8 @@ def update_agent_stats():
     except Exception as e:
         logger.error(f"Error updating agent stats: {e}")
         db.session.rollback()
-        
+
+
 # ============================================================================
 # API ENDPOINTS - HEALTH & INFO
 # ============================================================================
@@ -425,29 +542,26 @@ def home():
     """API root - shows service info."""
     return jsonify({
         'service': 'Tzurix MVP API',
-        'version': '1.0.0',
+        'version': '1.1.0',
         'description': 'AI Agent Performance Exchange - Where Price = Score',
         'network': 'Solana Devnet',
         'status': 'online',
+        'v1_features': ['tier_system', 'arena_scoring', 'interface_upload'],
         'constants': {
             'starting_score': STARTING_SCORE,
-            'price_multiplier': PRICE_MULTIPLIER,
+            'daily_point_cap': DAILY_POINT_CAP,
             'total_supply': TOTAL_SUPPLY,
-            'price_formula': 'Score × $0.01 per 1,000 tokens',
-            'daily_score_cap': f'±{int(DAILY_SCORE_CAP * 100)}%'
+            'tiers': list(TIERS.keys()),
         },
         'endpoints': {
             'agents': '/api/agents',
+            'tiers': '/api/tiers',
             'agent_detail': '/api/agents/<id>',
+            'agent_arena': '/api/agents/<id>/arena',
             'register_agent': 'POST /api/agents',
-            'get_quote': '/api/trade/quote',
-            'buy': 'POST /api/trade/buy',
-            'sell': 'POST /api/trade/sell',
-            'user_holdings': '/api/user/<wallet>/holdings',
-            'user_transactions': '/api/user/<wallet>/transactions',
+            'upload_interface': 'POST /api/agents/<id>/interface',
+            'change_tier': 'POST /api/agents/<id>/tier',
             'leaderboard': '/api/leaderboard',
-            'cron_scores': 'POST /api/cron/update-all-scores',
-            'cron_stats': 'POST /api/cron/update-stats'
         }
     })
 
@@ -459,7 +573,30 @@ def health():
         'status': 'healthy',
         'timestamp': int(time.time()),
         'database': 'connected',
-        'sol_price_usd': SOL_PRICE_USD
+        'sol_price_usd': SOL_PRICE_USD,
+        'version': 'v1'
+    })
+
+
+# ============================================================================
+# API ENDPOINTS - V1 TIERS
+# ============================================================================
+
+@app.route('/api/tiers', methods=['GET'])
+def get_tiers():
+    """Get all tier configurations."""
+    return jsonify({
+        'success': True,
+        'tiers': {
+            name: {
+                'name': config['name'],
+                'emoji': config['emoji'],
+                'difficulty': config['difficulty'],
+                'max_score': config['max_score'],
+                'description': config['description'],
+            }
+            for name, config in TIERS.items()
+        }
     })
 
 
@@ -476,11 +613,13 @@ def get_agents():
         - sort: 'score', 'newest', 'name', 'volume', 'holders' (default: score)
         - type: filter by agent type (trading, social, defi, utility)
         - category: filter by category (agent, individual)
+        - tier: filter by tier (alpha, beta, omega) - V1 NEW
         - limit: number of results (default: 50)
     """
     sort = request.args.get('sort', 'score')
     agent_type = request.args.get('type')
     category = request.args.get('category')
+    tier = request.args.get('tier')
     limit = min(int(request.args.get('limit', 50)), 100)
     
     query = Agent.query.filter_by(is_active=True)
@@ -492,6 +631,10 @@ def get_agents():
     # Filter by category if provided
     if category and category in ['agent', 'individual']:
         query = query.filter_by(category=category)
+    
+    # V1: Filter by tier if provided
+    if tier and tier.lower() in ['alpha', 'beta', 'omega']:
+        query = query.filter_by(tier=tier.lower())
     
     # Sort
     if sort == 'score':
@@ -514,6 +657,7 @@ def get_agents():
         'count': len(agents),
         'agents': [agent.to_dict() for agent in agents]
     })
+
 
 @app.route('/api/agents/<int:agent_id>', methods=['GET'])
 def get_agent(agent_id):
@@ -554,18 +698,27 @@ def register_agent():
     """
     Register a new AI trading agent.
     
+    V1 CHANGES:
+    - wallet_address is now OPTIONAL
+    - Added tier field
+    - Added social links
+    - Starting score is 20
+    
     Request body:
     {
-        "wallet_address": "AgentTradingWalletAddress",
-        "name": "My Trading Bot",
-        "description": "A description of what this agent does",
-        "creator_wallet": "CreatorWalletAddress"
+        "name": "My Trading Bot",                  # REQUIRED
+        "creator_wallet": "CreatorWalletAddress",  # REQUIRED
+        "wallet_address": "AgentWalletAddress",    # OPTIONAL in V1
+        "description": "Description",              # optional
+        "type": "trading",                         # optional
+        "tier": "alpha",                           # optional, default: alpha
+        "twitter_handle": "@mybot"                 # optional
     }
     """
     data = request.get_json()
     
-    # Validate required fields
-    required_fields = ['wallet_address', 'name', 'creator_wallet']
+    # V1: Required fields (wallet_address removed)
+    required_fields = ['name', 'creator_wallet']
     for field in required_fields:
         if not data.get(field):
             return jsonify({
@@ -589,22 +742,41 @@ def register_agent():
             'error': 'Invalid category. Must be "agent" or "individual"'
         }), 400
     
-    # Check if agent already exists
-    existing = Agent.query.filter_by(wallet_address=data['wallet_address']).first()
-    if existing:
+    # V1: Validate tier
+    tier = data.get('tier', 'alpha').lower()
+    if tier not in ['alpha', 'beta', 'omega']:
+        tier = 'alpha'
+    
+    # Check for duplicate wallet_address if provided
+    wallet_address = data.get('wallet_address')
+    if wallet_address:
+        existing = Agent.query.filter_by(wallet_address=wallet_address).first()
+        if existing:
+            return jsonify({
+                'success': False,
+                'error': 'Agent with this wallet address already registered'
+            }), 409
+    
+    # Check for duplicate name
+    existing_name = Agent.query.filter_by(name=data['name']).first()
+    if existing_name:
         return jsonify({
             'success': False,
-            'error': 'Agent with this wallet address already registered'
+            'error': 'Agent with this name already exists'
         }), 409
     
-    # Create new agent
+    # Create new agent with V1 fields
     agent = Agent(
-        wallet_address=data['wallet_address'],
         name=data['name'],
         description=data.get('description', ''),
         creator_wallet=data['creator_wallet'],
+        wallet_address=wallet_address,
         agent_type=agent_type,
         category=category,
+        tier=tier,
+        twitter_handle=data.get('twitter_handle'),
+        github_url=data.get('github_url'),
+        website_url=data.get('website_url'),
         current_score=STARTING_SCORE,
         previous_score=STARTING_SCORE,
         raw_score=STARTING_SCORE
@@ -625,7 +797,7 @@ def register_agent():
     
     db.session.commit()
     
-    logger.info(f"✅ New agent registered: {agent.name} ({agent.wallet_address[:8]}...)")
+    logger.info(f"✅ New agent registered: {agent.name} [Tier: {tier}] (Score: {STARTING_SCORE})")
     
     return jsonify({
         'success': True,
@@ -633,6 +805,232 @@ def register_agent():
         'agent': agent.to_dict()
     }), 201
 
+
+# ============================================================================
+# API ENDPOINTS - V1 ARENA & INTERFACE
+# ============================================================================
+
+@app.route('/api/agents/<int:agent_id>/arena', methods=['GET'])
+def get_agent_arena_results(agent_id):
+    """Get arena results for an agent."""
+    agent = Agent.query.get(agent_id)
+    
+    if not agent:
+        return jsonify({'success': False, 'error': 'Agent not found'}), 404
+    
+    tier_config = get_tier_config(agent.tier or 'alpha')
+    
+    return jsonify({
+        'success': True,
+        'agent_id': agent_id,
+        'agent_name': agent.name,
+        'tier': agent.tier or 'alpha',
+        'tier_info': {
+            'name': tier_config['name'],
+            'max_score': tier_config['max_score'],
+            'difficulty': tier_config['difficulty'],
+        },
+        'current_score': agent.current_score,
+        'score_ceiling': tier_config['max_score'],
+        'last_arena_run': agent.last_arena_run.isoformat() if agent.last_arena_run else None,
+        'has_interface': bool(agent.interface_code),
+        'interface_validated': agent.interface_validated or False,
+        'interface_version': agent.interface_version,
+        'arena_status': 'ready' if agent.interface_validated else ('pending_validation' if agent.interface_code else 'needs_interface'),
+        'message': 'Upload a decision interface to enable arena testing' if not agent.interface_code else 'Arena runs daily at 00:00 UTC'
+    })
+
+
+@app.route('/api/agents/<int:agent_id>/tier', methods=['POST'])
+def change_agent_tier(agent_id):
+    """
+    Change an agent's tier.
+    50% score carry on tier change.
+    
+    Request body:
+    {
+        "tier": "beta",
+        "creator_wallet": "CreatorWalletAddress"
+    }
+    """
+    data = request.get_json()
+    
+    new_tier = data.get('tier', '').lower()
+    if new_tier not in ['alpha', 'beta', 'omega']:
+        return jsonify({
+            'success': False,
+            'error': 'Invalid tier. Must be alpha, beta, or omega'
+        }), 400
+    
+    agent = Agent.query.get(agent_id)
+    if not agent:
+        return jsonify({'success': False, 'error': 'Agent not found'}), 404
+    
+    # Verify ownership
+    creator_wallet = data.get('creator_wallet')
+    if not creator_wallet or agent.creator_wallet != creator_wallet:
+        return jsonify({
+            'success': False,
+            'error': 'Not authorized. Must be agent creator.'
+        }), 403
+    
+    old_tier = agent.tier or 'alpha'
+    
+    if old_tier == new_tier:
+        return jsonify({
+            'success': False,
+            'error': f'Agent is already in {new_tier} tier'
+        }), 400
+    
+    # Apply tier change with 50% score carry
+    old_score = agent.current_score
+    agent.tier = new_tier
+    agent.previous_score = old_score
+    agent.current_score = round(old_score * 0.5, 1)
+    
+    db.session.commit()
+    
+    logger.info(f"🔄 Tier changed: {agent.name} {old_tier} → {new_tier} (Score: {old_score} → {agent.current_score})")
+    
+    return jsonify({
+        'success': True,
+        'message': f'Tier changed from {old_tier} to {new_tier}',
+        'old_tier': old_tier,
+        'new_tier': new_tier,
+        'old_score': old_score,
+        'new_score': agent.current_score,
+        'score_carry': '50%',
+        'agent': agent.to_dict()
+    })
+
+
+@app.route('/api/agents/<int:agent_id>/interface', methods=['POST'])
+def upload_agent_interface(agent_id):
+    """
+    Upload decision interface code for arena testing.
+    
+    Request body:
+    {
+        "creator_wallet": "CreatorWalletAddress",
+        "interface_code": "def decide(market_data, portfolio):\\n    ...",
+        "interface_type": "simple"
+    }
+    """
+    data = request.get_json()
+    
+    agent = Agent.query.get(agent_id)
+    if not agent:
+        return jsonify({'success': False, 'error': 'Agent not found'}), 404
+    
+    # Verify ownership
+    creator_wallet = data.get('creator_wallet')
+    if not creator_wallet or agent.creator_wallet != creator_wallet:
+        return jsonify({
+            'success': False,
+            'error': 'Not authorized. Must be agent creator.'
+        }), 403
+    
+    interface_code = data.get('interface_code')
+    if not interface_code:
+        return jsonify({
+            'success': False,
+            'error': 'Missing interface_code'
+        }), 400
+    
+    # Basic validation - check for decide() function
+    if 'def decide(' not in interface_code:
+        return jsonify({
+            'success': False,
+            'error': 'Interface must contain a decide(market_data, portfolio) function'
+        }), 400
+    
+    # Store interface
+    agent.interface_code = interface_code
+    agent.interface_type = data.get('interface_type', 'simple')
+    agent.interface_version = (agent.interface_version or 0) + 1
+    agent.interface_updated_at = datetime.utcnow()
+    agent.interface_validated = False
+    
+    db.session.commit()
+    
+    logger.info(f"📝 Interface uploaded: {agent.name} v{agent.interface_version}")
+    
+    return jsonify({
+        'success': True,
+        'message': 'Interface uploaded successfully',
+        'agent_id': agent_id,
+        'interface_version': agent.interface_version,
+        'validated': False,
+        'next_step': 'Interface will be validated and tested in the next arena run'
+    })
+
+
+# ============================================================================
+# API ENDPOINTS - V1 MIGRATION
+# ============================================================================
+
+@app.route('/api/admin/migrate-v1', methods=['POST'])
+def run_v1_migration():
+    """Run V1 database migration via API call."""
+    from sqlalchemy import text, inspect
+    
+    results = []
+    
+    def column_exists(table, column):
+        inspector = inspect(db.engine)
+        try:
+            columns = [c['name'] for c in inspector.get_columns(table)]
+            return column in columns
+        except:
+            return False
+    
+    def add_column(table, column, col_type, default=None):
+        if column_exists(table, column):
+            results.append(f"exists: {table}.{column}")
+            return
+        sql = f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+        if default:
+            sql += f" DEFAULT {default}"
+        try:
+            db.session.execute(text(sql))
+            db.session.commit()
+            results.append(f"added: {table}.{column}")
+        except Exception as e:
+            db.session.rollback()
+            results.append(f"error: {table}.{column} - {str(e)}")
+    
+    # Add new agent columns
+    add_column('agents', 'tier', 'VARCHAR(10)', "'alpha'")
+    add_column('agents', 'interface_type', 'VARCHAR(20)', 'NULL')
+    add_column('agents', 'interface_code', 'TEXT', 'NULL')
+    add_column('agents', 'interface_version', 'INTEGER', '1')
+    add_column('agents', 'interface_validated', 'BOOLEAN', 'FALSE')
+    add_column('agents', 'interface_updated_at', 'TIMESTAMP', 'NULL')
+    add_column('agents', 'last_arena_run', 'TIMESTAMP', 'NULL')
+    add_column('agents', 'last_activity_at', 'TIMESTAMP', 'NULL')
+    add_column('agents', 'twitter_handle', 'VARCHAR(50)', 'NULL')
+    add_column('agents', 'github_url', 'VARCHAR(200)', 'NULL')
+    add_column('agents', 'website_url', 'VARCHAR(200)', 'NULL')
+    
+    # Update existing agents with default tier
+    try:
+        result = db.session.execute(text("UPDATE agents SET tier = 'alpha' WHERE tier IS NULL OR tier = ''"))
+        db.session.commit()
+        results.append(f"updated: {result.rowcount} agents with default tier")
+    except Exception as e:
+        db.session.rollback()
+        results.append(f"error updating agents: {str(e)}")
+    
+    return jsonify({
+        'success': True,
+        'message': 'V1 migration complete',
+        'results': results
+    })
+
+
+# ============================================================================
+# API ENDPOINTS - AGENT SCORE & HISTORY
+# ============================================================================
 
 @app.route('/api/agents/<int:agent_id>/score', methods=['GET'])
 def get_agent_score(agent_id):
@@ -646,11 +1044,14 @@ def get_agent_score(agent_id):
         }), 404
     
     price_data = calculate_price(agent.current_score)
+    tier_config = get_tier_config(agent.tier or 'alpha')
     
     return jsonify({
         'success': True,
         'agent_id': agent_id,
         'name': agent.name,
+        'tier': agent.tier or 'alpha',
+        'score_ceiling': tier_config['max_score'],
         **price_data,
         'previous_score': agent.previous_score,
         'score_change_percent': ((agent.current_score - agent.previous_score) / agent.previous_score * 100) if agent.previous_score else 0
@@ -668,7 +1069,6 @@ def get_agent_history(agent_id):
             'error': 'Agent not found'
         }), 404
     
-    # Get last 30 days of history by default
     days = int(request.args.get('days', 30))
     since = datetime.utcnow() - timedelta(days=days)
     
@@ -684,6 +1084,7 @@ def get_agent_history(agent_id):
         'history': [h.to_dict() for h in history]
     })
 
+
 # ============================================================================
 # API ENDPOINTS - LEADERBOARD
 # ============================================================================
@@ -696,10 +1097,12 @@ def get_leaderboard():
     Query params:
         - metric: 'score', 'gainers', 'volume', 'holders' (default: score)
         - type: filter by agent type (optional)
+        - tier: filter by tier (optional) - V1 NEW
         - limit: number of results (default: 10, max: 50)
     """
     metric = request.args.get('metric', 'score')
     agent_type = request.args.get('type')
+    tier = request.args.get('tier')
     limit = min(int(request.args.get('limit', 10)), 50)
     
     query = Agent.query.filter_by(is_active=True)
@@ -707,10 +1110,13 @@ def get_leaderboard():
     if agent_type and agent_type in VALID_AGENT_TYPES:
         query = query.filter_by(agent_type=agent_type)
     
+    # V1: Filter by tier
+    if tier and tier.lower() in ['alpha', 'beta', 'omega']:
+        query = query.filter_by(tier=tier.lower())
+    
     if metric == 'score':
         query = query.order_by(Agent.current_score.desc())
     elif metric == 'gainers':
-        # Calculate percentage gain and sort
         agents = query.all()
         agents_with_gain = []
         for a in agents:
@@ -743,21 +1149,15 @@ def get_leaderboard():
         'count': len(agents),
         'agents': [a.to_dict() for a in agents]
     })
-    
+
+
 # ============================================================================
 # API ENDPOINTS - TRADING
 # ============================================================================
 
 @app.route('/api/trade/quote', methods=['GET'])
 def get_trade_quote():
-    """
-    Get a price quote for buying or selling.
-    
-    Query params:
-        - agent_id: ID of the agent
-        - side: 'buy' or 'sell'
-        - amount: SOL amount (for buy) or token amount (for sell)
-    """
+    """Get a price quote for buying or selling."""
     agent_id = request.args.get('agent_id', type=int)
     side = request.args.get('side', 'buy')
     amount = request.args.get('amount', type=float)
@@ -778,9 +1178,7 @@ def get_trade_quote():
     price_data = calculate_price(agent.current_score)
     
     if side == 'buy':
-        # amount is in SOL, calculate tokens received
         sol_amount = amount
-        # 1% fee
         sol_after_fee = sol_amount * 0.99
         tokens_received = int(sol_after_fee / price_data['price_sol'])
         
@@ -798,11 +1196,9 @@ def get_trade_quote():
             'current_score': agent.current_score
         })
     
-    else:  # sell
-        # amount is in tokens, calculate SOL received
+    else:
         token_amount = int(amount)
         sol_before_fee = token_amount * price_data['price_sol']
-        # 1% fee
         sol_received = sol_before_fee * 0.99
         
         return jsonify({
@@ -823,20 +1219,7 @@ def get_trade_quote():
 
 @app.route('/api/trade/buy', methods=['POST'])
 def buy_tokens():
-    """
-    Buy agent tokens.
-    
-    Request body:
-    {
-        "agent_id": 1,
-        "trader_wallet": "BuyerWalletAddress",
-        "sol_amount": 1.5,
-        "tx_signature": "SolanaTransactionSignature" (optional for testnet)
-    }
-    
-    Note: For MVP/testnet, this is simulated. Real implementation
-    will verify the Solana transaction.
-    """
+    """Buy agent tokens."""
     data = request.get_json()
     
     agent_id = data.get('agent_id')
@@ -857,39 +1240,33 @@ def buy_tokens():
             'error': 'Agent not found'
         }), 404
     
-    # Calculate tokens (SOL-based)
     price_data = calculate_price(agent.current_score)
     sol_after_fee = sol_amount * 0.99
     tokens_received = int(sol_after_fee / price_data['price_sol'])
     fee_sol = sol_amount * 0.01
     
-    # Convert to lamports
     sol_lamports = int(sol_amount * 1_000_000_000)
     
-    # Get or create user
     user = User.query.filter_by(wallet_address=trader_wallet).first()
     if not user:
         user = User(wallet_address=trader_wallet)
         db.session.add(user)
         db.session.flush()
     
-    # Record trade
     trade = Trade(
         agent_id=agent_id,
         trader_wallet=trader_wallet,
         side='buy',
         token_amount=tokens_received,
         sol_amount=sol_lamports,
-        price_at_trade=price_data['price_sol'],# Store SOL price
+        price_at_trade=price_data['price_sol'],
         score_at_trade=agent.current_score,
         tx_signature=tx_signature
     )
     db.session.add(trade)
     
-    # Update holdings (avg price in SOL)
     holding = Holding.query.filter_by(user_id=user.id, agent_id=agent_id).first()
     if holding:
-        # Update average buy price (in SOL)
         total_cost = (holding.token_amount * holding.avg_buy_price) + (tokens_received * price_data['price_sol'])
         total_tokens = holding.token_amount + tokens_received
         holding.avg_buy_price = total_cost / total_tokens if total_tokens > 0 else 0
@@ -899,14 +1276,11 @@ def buy_tokens():
             user_id=user.id,
             agent_id=agent_id,
             token_amount=tokens_received,
-            avg_buy_price=price_data['price_sol']  # Store SOL price
+            avg_buy_price=price_data['price_sol']
         )
         db.session.add(holding)
     
-    # Update agent reserve
     agent.reserve_lamports += sol_lamports
-
-    # Update last trade time for tiered scoring
     agent.last_trade_at = datetime.utcnow()
     
     db.session.commit()
@@ -925,17 +1299,7 @@ def buy_tokens():
 
 @app.route('/api/trade/sell', methods=['POST'])
 def sell_tokens():
-    """
-    Sell agent tokens back to the protocol.
-    
-    Request body:
-    {
-        "agent_id": 1,
-        "trader_wallet": "SellerWalletAddress",
-        "token_amount": 1000,
-        "tx_signature": "SolanaTransactionSignature" (optional for testnet)
-    }
-    """
+    """Sell agent tokens back to the protocol."""
     data = request.get_json()
     
     agent_id = data.get('agent_id')
@@ -956,7 +1320,6 @@ def sell_tokens():
             'error': 'Agent not found'
         }), 404
     
-    # Check user has enough tokens
     user = User.query.filter_by(wallet_address=trader_wallet).first()
     if not user:
         return jsonify({
@@ -971,21 +1334,18 @@ def sell_tokens():
             'error': 'Insufficient tokens'
         }), 400
     
-    # Calculate SOL received
     price_data = calculate_price(agent.current_score)
     sol_before_fee = token_amount * price_data['price_sol']
     fee_sol = sol_before_fee * 0.01
     sol_received = sol_before_fee * 0.99
     sol_lamports = int(sol_received * 1_000_000_000)
     
-    # Check reserve has enough
     if agent.reserve_lamports < sol_lamports:
         return jsonify({
             'success': False,
             'error': 'Insufficient reserve liquidity'
         }), 400
     
-    # Record trade
     trade = Trade(
         agent_id=agent_id,
         trader_wallet=trader_wallet,
@@ -998,13 +1358,8 @@ def sell_tokens():
     )
     db.session.add(trade)
     
-    # Update holdings
     holding.token_amount -= token_amount
-    
-    # Update agent reserve
     agent.reserve_lamports -= sol_lamports
-
-    # Update last trade time for tiered scoring
     agent.last_trade_at = datetime.utcnow()
     
     db.session.commit()
@@ -1068,16 +1423,10 @@ def get_user_holdings(wallet_address):
         'total_value_usd': total_value_usd
     })
 
+
 @app.route('/api/user/<wallet_address>/transactions', methods=['GET'])
 def get_user_transactions(wallet_address):
-    """
-    Get transaction history for a user.
-    
-    Query params:
-        - limit: number of results (default: 50, max: 100)
-        - offset: pagination offset (default: 0)
-        - agent_id: filter by specific agent (optional)
-    """
+    """Get transaction history for a user."""
     limit = min(int(request.args.get('limit', 50)), 100)
     offset = int(request.args.get('offset', 0))
     agent_id = request.args.get('agent_id', type=int)
@@ -1099,28 +1448,16 @@ def get_user_transactions(wallet_address):
         'offset': offset
     })
 
+
 # ============================================================================
 # API ENDPOINTS - ADMIN / SCORING
 # ============================================================================
 
 @app.route('/api/admin/update-score', methods=['POST'])
 def update_agent_score():
-    """
-    Update an agent's score (admin endpoint).
-    
-    In production, this will be called by automated scoring jobs.
-    For MVP, we allow manual updates for testing.
-    
-    Request body:
-    {
-        "agent_id": 1,
-        "new_score": 15,
-        "admin_key": "your-admin-key"
-    }
-    """
+    """Update an agent's score (admin endpoint)."""
     data = request.get_json()
     
-    # Simple admin key check (use proper auth in production)
     admin_key = os.environ.get('ADMIN_KEY', 'tzurix-dev-admin')
     if data.get('admin_key') != admin_key:
         return jsonify({
@@ -1144,17 +1481,12 @@ def update_agent_score():
             'error': 'Agent not found'
         }), 404
     
-    # Store previous score
     agent.previous_score = agent.current_score
-    
-    # Apply daily cap
     new_score = apply_daily_cap(agent.current_score, new_raw_score)
     agent.current_score = new_score
     
-    # Calculate new price
     price_data = calculate_price(new_score)
     
-    # Record in history
     history = ScoreHistory(
         agent_id=agent_id,
         score=new_score,
@@ -1179,16 +1511,14 @@ def update_agent_score():
         'new_price': price_data
     })
 
+
 # ============================================================================
 # API ENDPOINTS - SCORING (using scoring_engine)
 # ============================================================================
 
 @app.route('/api/score/<wallet_address>', methods=['GET'])
 def get_wallet_score(wallet_address):
-    """
-    Calculate and return score for a wallet using the scoring engine.
-    This endpoint shows detailed transaction analysis.
-    """
+    """Calculate and return score for a wallet using the scoring engine."""
     try:
         from scoring_engine import calculate_agent_score, generate_mock_score, HELIUS_API_KEY
         
@@ -1238,10 +1568,7 @@ def get_wallet_score(wallet_address):
 
 @app.route('/api/agent/<int:agent_id>/refresh-score', methods=['POST'])
 def refresh_agent_score(agent_id):
-    """
-    Refresh an agent's score from on-chain data.
-    Fetches latest transactions and recalculates score.
-    """
+    """Refresh an agent's score from on-chain data."""
     try:
         from scoring_engine import calculate_agent_score, HELIUS_API_KEY
         
@@ -1252,26 +1579,28 @@ def refresh_agent_score(agent_id):
                 'error': 'Agent not found'
             }), 404
         
+        if not agent.wallet_address:
+            return jsonify({
+                'success': False,
+                'error': 'Agent has no wallet_address - use arena scoring instead'
+            }), 400
+        
         if not HELIUS_API_KEY:
             return jsonify({
                 'success': False,
                 'error': 'Helius API key not configured'
             }), 500
         
-        # Calculate new score
         result = calculate_agent_score(
             wallet_address=agent.wallet_address,
             previous_score=agent.current_score
         )
         
-        # Update agent
         agent.previous_score = agent.current_score
         agent.current_score = result.final_score
         
-        # Calculate new price
         price_data = calculate_price(result.final_score)
         
-        # Record in history
         history = ScoreHistory(
             agent_id=agent_id,
             score=result.final_score,
@@ -1307,23 +1636,15 @@ def refresh_agent_score(agent_id):
             'success': False,
             'error': str(e)
         }), 500
+
+
 # ============================================================================
 # API ENDPOINTS - CRON / SCHEDULED TASKS
 # ============================================================================
 
 @app.route('/api/cron/update-all-scores', methods=['POST'])
 def cron_update_all_scores():
-    """
-    Cron endpoint: Update scores for all active agents.
-    
-    Call daily with external scheduler (cron-job.org, Railway cron, etc.)
-    Protected by CRON_SECRET environment variable.
-    
-    Authorization options:
-        Header: Authorization: Bearer {CRON_SECRET}
-        Body: {"cron_secret": "{CRON_SECRET}"}
-    """
-    # Verify authorization
+    """Cron endpoint: Update scores for all active agents."""
     auth_header = request.headers.get('Authorization', '')
     body_data = request.get_json(silent=True) or {}
     
@@ -1348,7 +1669,6 @@ def cron_update_all_scores():
                 'error': 'Helius API key not configured'
             }), 500
         
-        # Get all active agents
         agents = Agent.query.filter_by(is_active=True).all()
         
         results = {
@@ -1358,24 +1678,28 @@ def cron_update_all_scores():
         }
         
         for agent in agents:
+            if not agent.wallet_address:
+                results['skipped'].append({
+                    'id': agent.id,
+                    'name': agent.name,
+                    'reason': 'No wallet_address'
+                })
+                continue
+            
             try:
-                # Calculate new score from on-chain data
                 result = calculate_agent_score(
                     wallet_address=agent.wallet_address,
                     previous_score=agent.current_score
                 )
                 
-                # Update agent record
                 agent.previous_score = agent.current_score
                 agent.raw_score = result.raw_score
                 agent.current_score = result.final_score
                 agent.was_capped = result.capped
                 agent.last_score_update = datetime.utcnow()
                 
-                # Calculate new price for history
                 price_data = calculate_price(result.final_score)
                 
-                # Record in score history
                 history = ScoreHistory(
                     agent_id=agent.id,
                     score=result.final_score,
@@ -1404,8 +1728,6 @@ def cron_update_all_scores():
                 logger.error(f"❌ Cron failed for {agent.name}: {e}")
         
         db.session.commit()
-        
-        # Also update holder/volume stats
         update_agent_stats()
         
         return jsonify({
@@ -1433,11 +1755,7 @@ def cron_update_all_scores():
 
 @app.route('/api/cron/update-stats', methods=['POST'])
 def cron_update_stats():
-    """
-    Cron endpoint: Update holder counts and volume stats.
-    Can run more frequently than score updates (e.g., every 6 hours).
-    """
-    # Verify authorization
+    """Cron endpoint: Update holder counts and volume stats."""
     auth_header = request.headers.get('Authorization', '')
     body_data = request.get_json(silent=True) or {}
     
@@ -1466,8 +1784,9 @@ def cron_update_stats():
             'error': str(e)
         }), 500
 
+
 # ============================================================================
-# SCHEDULER - Tiered Score Updates (Add this entire section)
+# SCHEDULER - Tiered Score Updates
 # ============================================================================
 
 def update_single_agent_score(agent):
@@ -1479,23 +1798,24 @@ def update_single_agent_score(agent):
             logger.warning(f"[Scheduler] No Helius API key - skipping {agent.name}")
             return False
         
+        if not agent.wallet_address:
+            logger.warning(f"[Scheduler] No wallet_address - skipping {agent.name}")
+            return False
+        
         result = calculate_agent_score(
             wallet_address=agent.wallet_address,
             previous_score=agent.current_score
         )
         
         if result:
-            # Update agent record
             agent.previous_score = agent.current_score
             agent.raw_score = result.raw_score
             agent.current_score = result.final_score
             agent.was_capped = result.capped
             agent.last_score_update = datetime.utcnow()
             
-            # Calculate new price for history
             price_data = calculate_price(result.final_score)
             
-            # Record in score history
             history = ScoreHistory(
                 agent_id=agent.id,
                 score=result.final_score,
@@ -1512,12 +1832,7 @@ def update_single_agent_score(agent):
 
 
 def scheduled_tiered_score_update():
-    """
-    Tiered score updates based on trading activity:
-    - Hot (traded in last hour): Always update
-    - Active (traded in last 24h): Update if not updated in 10 min
-    - Idle (no recent trades): Update if not updated in 1 hour
-    """
+    """Tiered score updates based on trading activity."""
     with app.app_context():
         try:
             now = datetime.utcnow()
@@ -1535,15 +1850,12 @@ def scheduled_tiered_score_update():
                 minutes_since_update = (now - last_update).total_seconds() / 60
                 
                 if hours_since_trade <= 1:
-                    # HOT: traded in last hour - always update
                     should_update = True
                     tier = "HOT"
                 elif hours_since_trade <= 24:
-                    # ACTIVE: traded in last 24h - update every 10 min
                     should_update = minutes_since_update >= 10
                     tier = "ACTIVE"
                 else:
-                    # IDLE: no recent trades - update every hour
                     should_update = minutes_since_update >= 60
                     tier = "IDLE"
                 
@@ -1551,7 +1863,7 @@ def scheduled_tiered_score_update():
                     if update_single_agent_score(agent):
                         updated_count += 1
                         logger.info(f"[Scheduler] Updated {agent.name} ({tier}): {agent.previous_score} → {agent.current_score}")
-                    time.sleep(0.5)  # Rate limit protection
+                    time.sleep(0.5)
             
             db.session.commit()
             logger.info(f"[Scheduler] Tiered update complete: {updated_count}/{len(all_agents)} agents updated")
@@ -1604,7 +1916,7 @@ def scheduled_stats_update():
     """Update holder counts and 24h volume for all agents"""
     with app.app_context():
         try:
-            update_agent_stats()  # Uses your existing function
+            update_agent_stats()
             logger.info("[Scheduler] Stats update completed")
         except Exception as e:
             logger.error(f"[Scheduler] Stats update error: {e}")
@@ -1623,7 +1935,6 @@ def start_scheduler():
     
     scheduler = BackgroundScheduler(daemon=True)
     
-    # Tiered score updates - every 2 minutes
     scheduler.add_job(
         scheduled_tiered_score_update,
         IntervalTrigger(minutes=2),
@@ -1632,7 +1943,6 @@ def start_scheduler():
         max_instances=1
     )
     
-    # Daily weight reset - 00:00 UTC
     scheduler.add_job(
         scheduled_daily_weight_reset,
         CronTrigger(hour=0, minute=0),
@@ -1640,7 +1950,6 @@ def start_scheduler():
         replace_existing=True
     )
     
-    # Stats update (holders, volume) - every 30 minutes
     scheduler.add_job(
         scheduled_stats_update,
         IntervalTrigger(minutes=30),
@@ -1663,6 +1972,7 @@ def stop_scheduler():
         scheduler.shutdown()
         scheduler = None
         logger.info("[Scheduler] Stopped")
+
 
 # ============================================================================
 # API ENDPOINTS - SCHEDULER ADMIN
@@ -1703,7 +2013,8 @@ def admin_scheduler_status():
         "status": "running",
         "jobs": jobs
     })
-    
+
+
 # ============================================================================
 # DATABASE INITIALIZATION
 # ============================================================================
@@ -1727,7 +2038,6 @@ if os.environ.get('RAILWAY_ENVIRONMENT') or os.environ.get('START_SCHEDULER', 'f
     start_scheduler()
 
 if __name__ == '__main__':
-    # Start scheduler when running directly
     start_scheduler()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
